@@ -437,9 +437,10 @@ class dphy_rx(cfg : MIPIConfig,
    *   +0x04 clk_meas_long
    *   +0x08 clk_meas_short
    *   +0x0c rxcsr_datsettlecyc (RW)
-   *   +0x10 ref_dt (RW)
+   *   +0x10 ref_dt (RW) — filter for lp_av_en_o
    *   +0x14 rxcsr_rxfifo_pktdly (RW)
    *   +0x18.. WC counters when withErrorCounters
+   *   +0x64 last_lp_dt (RO) — last long-packet dt_o on the wire
    */
   def attach_bus(busSlaveFactory: BusIf, withErrorCounters: Boolean = true): Unit = {
     Component.current.withAutoPull()
@@ -493,6 +494,23 @@ class dphy_rx(cfg : MIPIConfig,
         "MIPI reference data type. Long packets whose data type matches this value assert lp_av_en_o. Resets to the refDt from the config.") init (default_ref_dt)
       GlobalSignals.externalize(io.packet_parser.ref_dt_i) :=
         crossClock(ref_dt_ctrl, ref_dt, io.byte_clock_domain(), default_ref_dt).asBits
+
+      /*
+       * Observed long-packet DT from the sensor (Soft-DPHY dt_o @ lp_en_o).
+       * Independent of ref_dt — use to verify shrimp MIPI DT vs filter.
+       */
+      val last_lp_dt_reg = busSlaveFactory.newRegAt(base + dphy_rx.OffLastLpDt, "last_lp_dt")(
+        SymbolName("last_lp_dt"))
+      val last_lp_dt = last_lp_dt_reg.field(UInt(6 bits), RO,
+        "Last MIPI data type from a long packet (wire dt_o when lp_en_o). Compare to ref_dt.")
+      val lastLpDtByte = new ClockingArea(io.byte_clock_domain()) {
+        val r = Reg(UInt(6 bits)) init 0
+        when(io.packet_parser.lp_en_o) {
+          r := io.packet_parser.dt_o
+        }
+        r
+      }.r
+      last_lp_dt := BufferCC(lastLpDtByte)
     }
 
     if (io.rxcsr_rxfifo_pktdly_i != null) {
@@ -556,5 +574,7 @@ object dphy_rx {
   val OffLpAvEn = 0x48
   val OffPayloadCrcVld = 0x50
   val OffFifoOvflw = 0x54
+  /** RO: last long-packet MIPI DT observed on the wire (after WC block @ 0x60). */
+  val OffLastLpDt = 0x64
   val WindowBytes = 0x100
 }
