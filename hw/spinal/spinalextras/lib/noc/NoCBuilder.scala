@@ -1,6 +1,6 @@
 package spinalextras.lib.noc
 
-import spinal.core.{Bits, IntToBuilder}
+import spinal.core.{Bits, IntToBuilder, RegNextWhen}
 import spinal.lib.{Fragment, Stream}
 import spinalextras.lib.misc.{StreamFragmentWidthAdapterEncoding, StreamTools}
 import spinalextras.lib.noc.protocols.ProtocolSpecification
@@ -45,12 +45,13 @@ class NoCBuilder(val cfg: NocConfig) {
       * must only be read from within a specification's own `build()` method, never at
       * registration time. */
     def createSlot(address: Int = -1): NodeSlot = {
-      if (address >= 0) {
+      if (address >= 0 && !usedAddresses.contains(address)) {
         require(address < cfg.topology.nodes, s"NoC node address $address is out of range (0 until ${cfg.topology.nodes})")
         require(!usedAddresses.contains(address), s"NoC node address $address already assigned")
         usedAddresses += address
         new NodeSlot(address)
       } else {
+        println(s"Warning: ${address} is already assigned; assigning random address")
         val handle = new NodeSlot(-1)
         pendingAutoClaims += handle
         handle
@@ -96,20 +97,31 @@ class NoCBuilder(val cfg: NocConfig) {
   def addSpecification(protocolSpecification: ProtocolSpecification) = {
     protocols.append(protocolSpecification)
   }
-
+  def verifyAddress(address : Int): Unit = {
+    if(address != -1) {
+      assert(address < cfg.topology.nodes)
+    }
+  }
   def addInput(input: Stream[Fragment[Bits]], address: Int = -1): Unit = {
+    verifyAddress(address)
     if (input.payload.fragment.getBitsWidth != cfg.dataWidth) {
-      val (header, tail) = StreamTools.takeHead(input)
-      inputs.append((address, StreamFragmentWidthAdapterEncoding.encode(tail, cfg.dataWidth).insertHeader(header.resize(cfg.dataWidth bits)).setName(f"${input.name}Adapted")))
+      val (headerFlow, tail) = StreamTools.takeHead(input)
+      val header = headerFlow.toReg()
+      val widthAdaptedEncoding = StreamFragmentWidthAdapterEncoding.encode(tail, cfg.dataWidth)
+      val widthAdapterEncodingWithHeader = widthAdaptedEncoding.insertHeader(header.resize(cfg.dataWidth bits))
+      inputs.append((address, widthAdapterEncodingWithHeader.setName(f"${input.name}Adapted")))
     } else {
       inputs.append((address, input))
     }
   }
 
   def addOutput(output: Stream[Fragment[Bits]], address: Int = -1) = {
-    val outputStream = new Stream(Fragment(Bits(cfg.dataWidth bits)))
-    outputs.append((address, outputStream.setName(f"${output.name}")))
-    StreamFragmentWidthAdapterEncoding.decode(outputStream, output.fragment.getBitsWidth).setName(f"${output.name}Adapted") >> output
+    verifyAddress(address)
+    val outputStreamWithHeader = new Stream(Fragment(Bits(cfg.dataWidth bits)))
+    outputs.append((address, outputStreamWithHeader.setName(f"${output.name}")))
+    val (hdrFlow, outputStream) = StreamTools.takeHead(outputStreamWithHeader)
+    val hdr = hdrFlow.toReg()
+    StreamFragmentWidthAdapterEncoding.decode(outputStream, output.fragment.getBitsWidth).insertHeader(hdr.resized).setName(f"${output.name}Adapted") >> output
   }
 
   def build(): NoC = {
@@ -126,12 +138,12 @@ class NoCBuilder(val cfg: NocConfig) {
     println("Input:")
     for (input <- inputs) {
       println(s"  - ${input._2.name}: ${cfg.topology.addressName(input._1)}")
-      noc.io.inputs(input._1) <> input._2
+      noc.io.inputs(input._1) << input._2
     }
     println("Output:")
     for (output <- outputs) {
       println(s"  - ${output._2.name}: ${cfg.topology.addressName(output._1)}")
-      noc.io.outputs(output._1) <> output._2
+      noc.io.outputs(output._1) >> output._2
     }
     noc.sealUnusedPorts()
 
