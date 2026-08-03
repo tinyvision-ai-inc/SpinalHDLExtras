@@ -61,6 +61,9 @@ class Constraints {
       file.println(s"create_clock -name {${cname}} -period ${freq.toTime.toDouble * 1e9} ${clockTarget(data, report.toplevel)}")
     }
 
+    // Jitter / PLL / board uncertainty applied to every declared clock.
+    file.println("set_clock_uncertainty 0.125 [all_clocks]")
+
     //    for ((clks, async) <- clock_groups) {
     //      file.println(s"set_clock_groups ${clks.map("-group [get_clocks {" + _.name +"}]").mkString(" ")} ${if(async) "-asynchronous" else ""}")
     //    }
