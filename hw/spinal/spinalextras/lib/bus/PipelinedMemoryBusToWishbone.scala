@@ -57,7 +57,7 @@ case class WishboneToPipelinedMemoryBus(pipelinedMemoryBusConfig : PipelinedMemo
   val pendingRead = RegInit(False) setWhen(io.pmb.readRequestFire) clearWhen(io.wb.ACK)
   io.pmb.cmd.valid := io.wb.masterHasRequest & !pendingRead
   io.pmb.cmd.data := (if (allowDataResize) io.wb.DAT_MOSI.resized else io.wb.DAT_MOSI)
-  io.pmb.cmd.address := io.wb.byteAddress().resized
+  io.pmb.cmd.address := addressMap(io.wb.byteAddress()).resized
   io.pmb.cmd.write := io.wb.WE
 
   if(io.wb.SEL != null) {
@@ -192,9 +192,10 @@ object PipelinedMemoryBusToWishbone {
   def apply(bus : PipelinedMemoryBus, config : WishboneConfig): Wishbone = {
     apply(bus, 0, config, addressMap = identity)
   }
-  def createDriver(bus : PipelinedMemoryBus, config : WishboneConfig): Wishbone = new Composite(bus, "wb2pmb"){
+  def createDriver(bus : PipelinedMemoryBus, config : WishboneConfig,
+                   addressMap : (UInt => UInt) = identity): Wishbone = new Composite(bus, "wb2pmb"){
     val wb = Wishbone(config)
-    val adapter = new WishboneToPipelinedMemoryBus(bus.config, config, 0, addressMap = identity)
+    val adapter = new WishboneToPipelinedMemoryBus(bus.config, config, 0, addressMap = addressMap)
     if(bus.name != null)
       adapter.setWeakName(s"${wb}_adapter")
     adapter.io.pmb.formalFullStage() >> bus

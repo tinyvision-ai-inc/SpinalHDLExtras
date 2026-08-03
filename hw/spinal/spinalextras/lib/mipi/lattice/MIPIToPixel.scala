@@ -16,7 +16,9 @@ case class MIPIToPixel(cfg : MIPIConfig,
                        sensor_name : String = "",
                        clock_suffix : Boolean = true,
                        is_continous_clock : Option[Boolean] = None,
-                       with_lmmi : Boolean = true
+                       with_lmmi : Boolean = true,
+                       /** Soft-DPHY RX FIFO (pktdly + fifo misc). Independent of continuous clock. */
+                       with_rx_fifo : Boolean = false
                  ) extends Component {
   val io = new Bundle {
     val mipi = slave(MIPIIO(cfg.numRXLanes))
@@ -27,8 +29,8 @@ case class MIPIToPixel(cfg : MIPIConfig,
     val pixelFlow = master(Flow(Fragment(Vec(Bits(cfg.PIX_WIDTH bits), cfg.outputLanes))))
 
     /**
-     * Header events in pixel_cd.
-     * sof/eof: short packet dt 0/1; line: long AV with CSI-2 payload byte count.
+     * Header events in the Soft-DPHY **byte** clock domain (`lp_en`/`sp_en`).
+     * Cross to the stats/CPU domain with StreamCC (see TinyvisionCameraBoard).
      */
     val mipi_header = master Flow(MIPIPacketHeader())
 
@@ -45,19 +47,21 @@ case class MIPIToPixel(cfg : MIPIConfig,
   }
 
   noIoPrefix()
-  // No-LMMI Soft-DPHY hardcodes settle / pkt delay; omit those dynamic ports.
+  // Soft-DPHY exposes settle always; FIFO pkt delay only when with_rx_fifo.
   val mipi_to_bytes = new dphy_rx(cfg,
     sync_cd = sync_cd,
     byte_cd = byte_cd,
     clock_suffix = clock_suffix,
     is_continous_clock = is_continous_clock,
     with_lmmi = with_lmmi,
-    cfg_datsettle_cyc = with_lmmi,
-    cfg_fifo_read_delay = with_lmmi,
-  //  enable_fifo_misc_signals = Some(true)
+    with_rx_fifo = with_rx_fifo,
+    cfg_datsettle_cyc = true,
+    cfg_fifo_read_delay = with_rx_fifo,
   )
   if(with_lmmi) {
     io.dphy_lmmi <> mipi_to_bytes.io.lmmi
+    mipi_to_bytes.io.lmmi_clk_i := ClockDomain.current.readClockWire
+    mipi_to_bytes.io.lmmi_resetn_i := !ClockDomain.current.isResetActive
   }
   mipi_to_bytes.assignMIPI(io.mipi)
 
@@ -65,9 +69,14 @@ case class MIPIToPixel(cfg : MIPIConfig,
   mipi_to_bytes.io.tx_rdy_i := io.tx_rdy
   // ref_dt_i is left to its port default (cfg.refDt.id). When attach_bus() is called it
   // is overridden by the runtime-writable ref_dt register (see dphy_rx.attach_bus).
+  // Soft-DPHY LMMI variant has no parallel ref_dt / vcx / dropnull pins.
 
-  mipi_to_bytes.io.rxcsr_dropnull_i := False
-  mipi_to_bytes.io.rxcsr_vcx_on_i := False
+  if (mipi_to_bytes.io.rxcsr_dropnull_i != null) {
+    mipi_to_bytes.io.rxcsr_dropnull_i := False
+  }
+  if (mipi_to_bytes.io.rxcsr_vcx_on_i != null) {
+    mipi_to_bytes.io.rxcsr_vcx_on_i := False
+  }
 
   val bytes_to_pixels = byte2pixel(cfg, pixel_cd = pixel_cd, byte_cd = mipi_to_bytes.byte_cd())
 

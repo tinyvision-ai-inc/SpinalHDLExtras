@@ -44,12 +44,13 @@ class LMMI(config: LMMIConfig) extends Bundle with IMasterSlave {
     slave(rsp)
   }
 
-  def toWishbone(config: WishboneConfig = WishboneConfig(addressWidth = 32, dataWidth = 32, selWidth = 4, addressGranularity = AddressGranularity.BYTE, useERR = true)): Wishbone  = {
+  def toWishbone(config: WishboneConfig = WishboneConfig(addressWidth = 32, dataWidth = 32, selWidth = 4, addressGranularity = AddressGranularity.BYTE, useERR = true),
+                 addressMap: (UInt => UInt) = identity): Wishbone  = {
     val bus = toPipelinedMemoryBus()
     if (globalData.config.formalAsserts) {
       bus.formalIsConsumerValid().foreach(x => assume(x.condition)(x.loc))
     }
-    PipelinedMemoryBusToWishbone.createDriver(bus, config)
+    PipelinedMemoryBusToWishbone.createDriver(bus, config, addressMap = addressMap)
   }
 
   def toPipelinedMemoryBus() : PipelinedMemoryBus = {

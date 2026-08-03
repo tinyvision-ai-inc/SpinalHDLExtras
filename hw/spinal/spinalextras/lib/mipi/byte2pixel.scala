@@ -183,21 +183,32 @@ case class byte2pixel(cfg : MIPIConfig,
     if(byte_clock_fifo) {
       conversion_area.bytes << io.payload.takeWhen(isRefDt)
 
-      fifo.io.push.payload._1 := Delay(fv, 5) ## conversion_area.pixel_stream.valid
+      val fvD = Delay(fv, 5)
+      val pixV = conversion_area.pixel_stream.valid
+      // fv-only beat so FE can cross when no pixel is produced that cycle
+      val fvFall = !fvD && RegNext(fvD, False)
+
+      fifo.io.push.payload._1 := fvD ## pixV
       fifo.io.push.payload._2 := conversion_area.pixel_stream.payload.asBits
-
+      // Push on converted pixels (~payload_rate * GEARED/DT), not on every
+      // meta-edge. The old "push when _1 changes" path also fired on valid
+      // 1→0 at byte_cd when byte_cd > pixel_cd, so push ran at the full byte
+      // rate while pop ran at pixel_cd — depth-16 StreamFifoCC overflowed
+      // (choppy / corrupt video on flir_uab: 90 MHz byte vs 75 MHz CPU pixel).
+      fifo.io.push.valid := pixV || fvFall
     } else {
-      fifo.io.push.payload._1 := fv ## (io.payload.valid && isRefDt)
-      fifo.io.push.payload._2 := io.payload.payload
-    }
+      val hasByte = io.payload.valid && isRefDt
+      val fvFall = !fv && RegNext(fv, False)
 
-    // When the byte cd freq is slower than the pixel clock; we can just flood the fifo. But when the byte clock
-    // is faster, only do it on changes.
-    fifo.io.push.valid := {
-      if (byte_cd_freq > pixel_cd.frequency.getValue)
-        fifo.io.push.payload._1 =/= RegNext(fifo.io.push.payload._1)
-      else
-        True
+      fifo.io.push.payload._1 := fv ## hasByte
+      fifo.io.push.payload._2 := io.payload.payload
+      // Same rule: never flood/edge-spam the CDC FIFO faster than pixel_cd.
+      fifo.io.push.valid := {
+        if (byte_cd_freq > pixel_cd.frequency.getValue)
+          hasByte || fvFall
+        else
+          True
+      }
     }
 
     assert(fifo.io.push.ready, "Fifo overflow")
