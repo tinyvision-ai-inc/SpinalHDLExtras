@@ -76,24 +76,34 @@ case class byte2pixel(cfg : MIPIConfig,
   }
 
   val lcm_width = lcm(cfg.GEARED_LANES, cfg.DT_WIDTH)
-  val fifo_min_depth = 16 // Math.pow(2, (1 + Math.log(lcm_width / cfg.GEARED_LANES) / Math.log(2)).ceil).toInt
 
   val byte_cd_freq = byte_cd.frequency.getValue
   val byte_phy_freq = cfg.dphyByteFreq
+  val pixel_cd_freq = pixel_cd.frequency.getValue
 
   val byte_clock_fast_enough = byte_cd_freq >= byte_phy_freq
-  val pixel_clock_fast_enough = byte_phy_freq * cfg.GEARED_LANES <= pixel_cd.frequency.getValue * cfg.DT_WIDTH
+  val pixel_clock_fast_enough = byte_phy_freq * cfg.GEARED_LANES <= pixel_cd_freq * cfg.DT_WIDTH
 
   if(!byte_clock_fast_enough || !pixel_clock_fast_enough) {
     System.err.println("Byte To pixel component configuration not viable")
     System.err.println(s"Byte Clock: ${byte_cd_freq.decomposeString} should be >= ${byte_phy_freq.decomposeString}")
-    System.err.println(s"Pixel Clock: ${pixel_cd.frequency.getValue} should be >= ${byte_phy_freq * cfg.GEARED_LANES / cfg.DT_WIDTH}")
+    System.err.println(s"Pixel Clock: ${pixel_cd_freq} should be >= ${byte_phy_freq * cfg.GEARED_LANES / cfg.DT_WIDTH}")
     System.err.println(s"Byte data rate: ${byte_phy_freq * cfg.GEARED_LANES}")
-    System.err.println(s"Pixel data rate: ${pixel_cd.frequency.getValue * cfg.DT_WIDTH}")
+    System.err.println(s"Pixel data rate: ${pixel_cd_freq * cfg.DT_WIDTH}")
   }
 
   require(byte_clock_fast_enough, "Byte clock is not fast enough to handle this PHY as configured. Either increase the byte clock speed or correct the dphy clock frequency.")
   require(pixel_clock_fast_enough, "Pixel clock is not fast enough to handle this PHY as configured. Either increase the number out output lanes, increase the pixel clock frequency or correct the byte / dphy clock frequeny.")
+
+  // Depth-16 was too shallow under Soft-DPHY RX-FIFO bursts / CDC skew (flir: 90↔75 MHz).
+  // Size to ≥2× clock ratio, power-of-two for StreamFifoCC.
+  private def nextPow2(n: Int): Int = {
+    var p = 1
+    while (p < n) p <<= 1
+    p
+  }
+  val clockRatioCeil = scala.math.max(1.0, byte_cd_freq.toDouble / pixel_cd_freq.toDouble)
+  val fifo_min_depth = nextPow2(scala.math.max(32, (32 * clockRatioCeil).ceil.toInt))
 
   {
     val pixelCounter, lineCounter = Counter(32 bits)
@@ -135,10 +145,14 @@ case class byte2pixel(cfg : MIPIConfig,
   val conversion_area = new ClockingArea(conversion_clock) {
     val lcm_stream = Stream(Vec(Bits(8 bits), lcm_width/8))
     val pixel_stream = Stream(Vec(Bits(MIPIDataTypes.bit_width(cfg.refDt) bits), cfg.outputLanes))
-    pixel_stream.ready := True
+    // ready is driven by the push path (backpressure into the width adapters).
 
     val bytes = Flow(Bits(cfg.GEARED_LANES bits))
     val overflow = Bool()
+    val gearOverflowCount = Counter(32 bits)
+    when(overflow) {
+      gearOverflowCount.increment()
+    }
 
     assert(overflow === False, "bytes overflow")
     StreamWidthAdapter(bytes.toStream(overflow), lcm_stream)
@@ -157,6 +171,11 @@ case class byte2pixel(cfg : MIPIConfig,
     when(fifo.io.push.isStall) {
       stallCount.increment()
     }
+
+    // Pixels offered to the CDC FIFO but not accepted — these are *lost* unless
+    // we backpressure the converter (byte_clock_fifo path) or deepen the FIFO.
+    val pushDropCount = Counter(32 bits)
+    val overflowSticky = RegInit(False)
 
     when(io.mipi_header.fire) {
       when(inFSPacket) {
@@ -196,6 +215,14 @@ case class byte2pixel(cfg : MIPIConfig,
       // rate while pop ran at pixel_cd — depth-16 StreamFifoCC overflowed
       // (choppy / corrupt video on flir_uab: 90 MHz byte vs 75 MHz CPU pixel).
       fifo.io.push.valid := pixV || fvFall
+      // Hold the converted pixel until the CDC FIFO accepts it. Previously
+      // pixel_stream.ready was tied True → silent drops on stall (alternating
+      // good/bad rows when Soft-DPHY RX FIFO bursts fill the CDC).
+      conversion_area.pixel_stream.ready := !pixV || fifo.io.push.ready
+
+      when(fifo.io.push.isStall) {
+        overflowSticky := True
+      }
     } else {
       val hasByte = io.payload.valid && isRefDt
       val fvFall = !fv && RegNext(fv, False)
@@ -203,15 +230,23 @@ case class byte2pixel(cfg : MIPIConfig,
       fifo.io.push.payload._1 := fv ## hasByte
       fifo.io.push.payload._2 := io.payload.payload
       // Same rule: never flood/edge-spam the CDC FIFO faster than pixel_cd.
+      // Conversion runs on pixel_cd here, so we cannot backpressure Soft-DPHY
+      // payload; drops are counted and depth is sized for the clock ratio.
       fifo.io.push.valid := {
-        if (byte_cd_freq > pixel_cd.frequency.getValue)
+        if (byte_cd_freq > pixel_cd_freq)
           hasByte || fvFall
         else
           True
       }
+      conversion_area.pixel_stream.ready := True
+
+      when(fifo.io.push.valid && !fifo.io.push.ready) {
+        pushDropCount.increment()
+        overflowSticky := True
+      }
     }
 
-    assert(fifo.io.push.ready, "Fifo overflow")
+    assert(fifo.io.push.ready || !fifo.io.push.valid, "Fifo overflow")
 
     GlobalLogger(Set("mipi"),
       FlowLogger.flows(io.mipi_header)
@@ -258,6 +293,8 @@ case class byte2pixel(cfg : MIPIConfig,
     val sig = busSlaveFactory.newReg("b2p start")
     val signature = sig.field(Bits(32 bit), ROV, BigInt("F000A803", 16), "ip sig")
 
+    // Keep legacy order (sig/stall/watermarks/activity) so existing Soft IP maps
+    // and Zephyr DT stay valid; append new health regs at the end.
     for(counter : UInt <- Seq(
       byte_clk_area.stallCount.value.setName("stall"),
       byte_clk_area.watermarkReg.setName("push_occ_watermark"),
@@ -279,6 +316,23 @@ case class byte2pixel(cfg : MIPIConfig,
       when(error_signal) {
         cnt := cnt + 1
       }
+    }
+
+    {
+      val reg = busSlaveFactory.newReg("push_drop")(SymbolName("push_drop"))
+      val cnt = reg.field(UInt(32 bits), RO, "push_drop")(SymbolName("push_drop_cnt"))
+      cnt := BufferCC(byte_clk_area.pushDropCount.value).resized
+    }
+    {
+      val reg = busSlaveFactory.newReg("overflow_sticky")(SymbolName("overflow_sticky"))
+      val bit = reg.field(Bool(), RO, "overflow_sticky")(SymbolName("overflow_sticky_bit"))
+      bit := BufferCC(byte_clk_area.overflowSticky)
+    }
+    {
+      val reg = busSlaveFactory.newReg("gear_overflow")(SymbolName("gear_overflow"))
+      val cnt = reg.field(UInt(32 bits), RO, "gear_overflow")(SymbolName("gear_overflow_cnt"))
+      // Same clock as conversion when byte_clock_fifo; BufferCC is still safe.
+      cnt := BufferCC(conversion_area.gearOverflowCount.value).resized
     }
   }
 }
