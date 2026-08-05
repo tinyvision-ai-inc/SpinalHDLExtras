@@ -85,14 +85,19 @@ case class MIPIToPixel(cfg : MIPIConfig,
   bytes_to_pixels.assignMIPIBytes(mipi_to_bytes.MIPIBytes)
 
   io.mipi_header << mipiHdr
-  io.frame_valid := bytes_to_pixels.io.pixelFlow.frame_valid
 
-  io.pixelFlow <> PixelFlow2Fragment(bytes_to_pixels.io.pixelFlow).map(f => {
-    val outFlow = Fragment(Vec(Bits(cfg.PIX_WIDTH bits), cfg.outputLanes))
-    outFlow.last := f.last
-    outFlow.fragment.assignFromBits(f.fragment)
-    outFlow
-  })
+  // PixelFlow2Fragment / io.pixelFlow must run in pixel_cd. MIPIToPixel is often
+  // elaborated under the CPU ClockDomain; without this area the fragment path is
+  // tagged CPU while byte2pixel drives pixel_cd → PhaseCheckCrossClock.
+  new ClockingArea(pixel_cd) {
+    io.frame_valid := bytes_to_pixels.io.pixelFlow.frame_valid
+    io.pixelFlow <> PixelFlow2Fragment(bytes_to_pixels.io.pixelFlow).map(f => {
+      val outFlow = Fragment(Vec(Bits(cfg.PIX_WIDTH bits), cfg.outputLanes))
+      outFlow.last := f.last
+      outFlow.fragment.assignFromBits(f.fragment)
+      outFlow
+    })
+  }
 
   def byte_clock_domain() : ClockDomain = {
     mipi_to_bytes.byte_cd()
