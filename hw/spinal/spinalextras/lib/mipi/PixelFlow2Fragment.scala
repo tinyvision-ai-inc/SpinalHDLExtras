@@ -15,13 +15,22 @@ class PixelFlow2Fragment[T <: Data](val dataType: HardType[T]) extends Component
   }
 
   val overflow = Bool()
+  // Hold the newest pixel until the next valid *or* until frame_valid falls so
+  // we can mark EOF on that last pixel. continueWhen must be FALSE while
+  // FV is high and valid is low — otherwise the stage drains between pixels
+  // and the EOF beat is lost (no USB frames).
   val lastValidPixel = io.pixelFlow.toStream(overflow).stage()
   assert(!overflow)
+
+  // last is a pulse on FV falling edge, not level ~FV. Level-last tagged every
+  // early new-frame beat that still saw frame_valid=0 (byte2pixel Delay(fv)
+  // lag after SOF) as EOF → extra empty UVC frames (~2× sof on flir_uab).
+  val fvFall = !io.pixelFlow.frame_valid && RegNext(io.pixelFlow.frame_valid, False)
 
   io.pixelFragment <>
     lastValidPixel.
       continueWhen(~io.pixelFlow.frame_valid || io.pixelFlow.valid).
-      addFragmentLast(~io.pixelFlow.frame_valid).toFlow
+      addFragmentLast(fvFall).toFlow
 
   GlobalLogger(
     Set("mipi"),

@@ -105,32 +105,6 @@ case class byte2pixel(cfg : MIPIConfig,
   val clockRatioCeil = scala.math.max(1.0, byte_cd_freq.toDouble / pixel_cd_freq.toDouble)
   val fifo_min_depth = nextPow2(scala.math.max(32, (32 * clockRatioCeil).ceil.toInt))
 
-  {
-    val pixelCounter, lineCounter = Counter(32 bits)
-    val pixelCounterFlow = Flow(TupleBundle(UInt(32 bits), UInt(32 bits)))
-    pixelCounterFlow.setName("pixelCounterFlow")
-    pixelCounterFlow.valid := False
-    pixelCounterFlow.payload._1 := pixelCounter
-    pixelCounterFlow.payload._2 := lineCounter
-    when(~io.pixelFlow.line_valid) {
-      lineCounter.clear()
-    }
-    when(~io.pixelFlow.frame_valid) {
-      pixelCounter.clear()
-      when(pixelCounter =/= 0) {
-        pixelCounterFlow.valid := True
-      }
-    }
-    when(io.pixelFlow.valid) {
-      pixelCounter.increment()
-      lineCounter.increment()
-    }
-
-    GlobalLogger(Set("mipi"),
-      FlowLogger.flows(pixelCounterFlow)
-    )
-  }
-
   val clock_ratio = (byte_phy_freq / pixel_cd.frequency.getValue).toDouble
   val delay_time_ratio = 8.0 * ((1.0 / cfg.GEARED_LANES) - clock_ratio / cfg.DT_WIDTH)
   // TODO -- if desired you can use delay_time above to keep line_valid solid for one full row
@@ -202,12 +176,18 @@ case class byte2pixel(cfg : MIPIConfig,
     if(byte_clock_fifo) {
       conversion_area.bytes << io.payload.takeWhen(isRefDt)
 
+      // Delay FV to cover StreamWidthAdapter latency after FE so trailing
+      // converted pixels still see in-frame. Do NOT push fvD alone as the
+      // in-frame tag: after SOF, fv rises immediately but fvD lags → early
+      // new-frame pixels were tagged frame_valid=0. PixelFlow2Fragment uses
+      // last=~frame_valid, so those beats became extra EOFs (full-size black
+      // UVC frames at ~2× sof — flir_uab live vs TPG).
       val fvD = Delay(fv, 5)
+      val fvTag = fv || fvD
       val pixV = conversion_area.pixel_stream.valid
-      // fv-only beat so FE can cross when no pixel is produced that cycle
       val fvFall = !fvD && RegNext(fvD, False)
 
-      fifo.io.push.payload._1 := fvD ## pixV
+      fifo.io.push.payload._1 := fvTag ## pixV
       fifo.io.push.payload._2 := conversion_area.pixel_stream.payload.asBits
       // Push on converted pixels (~payload_rate * GEARED/DT), not on every
       // meta-edge. The old "push when _1 changes" path also fired on valid
@@ -270,12 +250,41 @@ case class byte2pixel(cfg : MIPIConfig,
       conversion_area.bytes.valid := fifo.io.pop.fire && fifo.io.pop.payload._1(0)
       conversion_area.bytes.payload := fifo.io.pop.payload._2
 
-      io.pixelFlow.frame_valid := Delay(fv, 5)
+      // Same SOF/FE alignment rule as push-side fvTag: OR undelayed fv with
+      // pipeline delay so early converted pixels are never valid under ~FV.
+      val fvD = Delay(fv, 5)
+      io.pixelFlow.frame_valid := fv || fvD
       io.pixelFlow.valid := conversion_area.pixel_stream.valid
       io.pixelFlow.payload := conversion_area.pixel_stream.payload.asBits
     }
 
     assert(!(io.pixelFlow.frame_valid == False && io.pixelFlow.valid == True), "Linevalid when frame valid is false")
+
+    // Must sit in pixel_cd — io.pixelFlow is driven above; component default
+    // clock is often CPU when MIPIToPixel is elaborated under spinex.
+    val pixelCounter, lineCounter = Counter(32 bits)
+    val pixelCounterFlow = Flow(TupleBundle(UInt(32 bits), UInt(32 bits)))
+    pixelCounterFlow.setName("pixelCounterFlow")
+    pixelCounterFlow.valid := False
+    pixelCounterFlow.payload._1 := pixelCounter
+    pixelCounterFlow.payload._2 := lineCounter
+    when(~io.pixelFlow.line_valid) {
+      lineCounter.clear()
+    }
+    when(~io.pixelFlow.frame_valid) {
+      pixelCounter.clear()
+      when(pixelCounter =/= 0) {
+        pixelCounterFlow.valid := True
+      }
+    }
+    when(io.pixelFlow.valid) {
+      pixelCounter.increment()
+      lineCounter.increment()
+    }
+
+    GlobalLogger(Set("mipi"),
+      FlowLogger.flows(pixelCounterFlow)
+    )
   }
 
   def assignMIPIBytes(bytes : Flow[Bits]): Unit = {
