@@ -167,7 +167,7 @@ class Axi4ToPipelinedMemoryBus(config: Axi4ToPipelinedMemoryBusConfig) extends C
         goto(sWriteBurstReceiveW)
       }.elsewhen(io.axi.ar.fire) { // Read Address received
         read_area.ar_reg := io.axi.ar
-        addr_increment := get_addr_increment(io.axi.aw.size)
+        addr_increment := get_addr_increment(io.axi.ar.size)
 
         read_area.read_beats_remaining := io.axi.ar.len +^ 1
         read_area.rsp_beats_remaining := io.axi.ar.len +^ 1

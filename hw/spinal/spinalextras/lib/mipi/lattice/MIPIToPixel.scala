@@ -47,7 +47,8 @@ case class MIPIToPixel(cfg : MIPIConfig,
   }
 
   noIoPrefix()
-  // Soft-DPHY exposes settle always; FIFO pkt delay only when with_rx_fifo.
+  // No-LMMI Soft-DPHY hardcodes settle / pkt delay in the Soft-IP wrapper
+  // Only expose those parallel ports when LMMI is on (DYN_*).
   val mipi_to_bytes = new dphy_rx(cfg,
     sync_cd = sync_cd,
     byte_cd = byte_cd,
@@ -55,8 +56,8 @@ case class MIPIToPixel(cfg : MIPIConfig,
     is_continous_clock = is_continous_clock,
     with_lmmi = with_lmmi,
     with_rx_fifo = with_rx_fifo,
-    cfg_datsettle_cyc = true,
-    cfg_fifo_read_delay = with_rx_fifo,
+    cfg_datsettle_cyc = with_lmmi,
+    cfg_fifo_read_delay = with_lmmi && with_rx_fifo,
   )
   if(with_lmmi) {
     io.dphy_lmmi <> mipi_to_bytes.io.lmmi
