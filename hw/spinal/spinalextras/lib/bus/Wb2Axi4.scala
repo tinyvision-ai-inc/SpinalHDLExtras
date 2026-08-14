@@ -49,7 +49,9 @@ case class Wb2Axi4(wbConfig : WishboneConfig, axiConfig: Axi4Config, val AXI_WRI
   io.axi.aw.id   := U(AXI_WRITE_ID, C_AXI_ID_WIDTH bits)
   io.axi.aw.len  := 0
   io.axi.aw.size := DWSIZE
-  io.axi.aw.burst:= 0
+  // INCR: Axi4ToPipelinedMemoryBus asserts/assumes AxBURST==INCR (sim/formal).
+  // len is always 0 here, so FIXED would transfer the same; it would only fail those checks.
+  io.axi.aw.burst:= B"2'b01"
 
   if(io.axi.aw.lock != null) io.axi.aw.lock := 0
   if(io.axi.aw.cache != null) io.axi.aw.cache:= 3
@@ -63,7 +65,7 @@ case class Wb2Axi4(wbConfig : WishboneConfig, axiConfig: Axi4Config, val AXI_WRI
   io.axi.ar.id   := U(AXI_READ_ID, C_AXI_ID_WIDTH bits)
   io.axi.ar.len  := 0
   io.axi.ar.size := DWSIZE
-  io.axi.ar.burst:= B"2'b00"
+  io.axi.ar.burst:= B"2'b01" // INCR (same reason as aw.burst; len always 0)
   if(io.axi.ar.cache != null) io.axi.ar.cache:= B"4'h3"
   if(io.axi.ar.prot != null) io.axi.ar.prot := B"3'b010"
 
