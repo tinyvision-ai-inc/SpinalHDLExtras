@@ -115,7 +115,7 @@ class byte2pixel(cfg : MIPIConfig, enable_misc_signals : Boolean = true, byte_cd
 
   Component.push(parent)
   attachClockDomains(byte_cd, pixel_cd)
-  enable_logging generate new ClockingArea(byte_cd) {
+  (enable_logging && io.debug_signals != null) generate new ClockingArea(byte_cd) {
     GlobalLogger(
       SignalLogger.concat("b2p_debug",
         io.debug_signals.mem_re_o, io.debug_signals.mem_we_o,
@@ -125,6 +125,7 @@ class byte2pixel(cfg : MIPIConfig, enable_misc_signals : Boolean = true, byte_cd
   }
 
   def attach_bus(busSlaveFactory: BusIf): Unit = {
+    require(io.debug_signals != null, "byte2pixel.attach_bus needs enable_misc_signals")
     Component.current.withAutoPull()
 
     val sig = busSlaveFactory.newReg("b2p start")

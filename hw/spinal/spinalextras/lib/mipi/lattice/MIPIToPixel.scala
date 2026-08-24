@@ -3,7 +3,7 @@ package spinalextras.lib.mipi.lattice
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.regif.BusIf
-import spinalextras.lib.blackbox.lattice.lifcl.dphy_rx
+import spinalextras.lib.blackbox.lattice.lifcl.{CsiErrorPulses, dphy_rx}
 import spinalextras.lib.bus.LMMI
 import spinalextras.lib.mipi._
 
@@ -18,7 +18,17 @@ case class MIPIToPixel(cfg : MIPIConfig,
                        is_continous_clock : Option[Boolean] = None,
                        with_lmmi : Boolean = true,
                        /** Soft-DPHY RX FIFO (pktdly + fifo misc). Independent of continuous clock. */
-                       with_rx_fifo : Boolean = false
+                       with_rx_fifo : Boolean = false,
+                       /** Soft-DPHY CRC_CHECK_IN ports. Match the regenerated IP .cfg. */
+                       enable_crc_check : Boolean = true,
+                       /** Soft-DPHY LANE_ALIGN. Inside the encrypted core; must match .cfg. */
+                       with_lane_align : Boolean = true,
+                       /** PulseCC error/activity + clk_byte_hs for the shared CSI error bank. */
+                       with_error_pulses : Boolean = true,
+                       /** Soft-DPHY / byte2pixel SignalLogger taps. Off with withDebugRegisters. */
+                       enable_logging : Boolean = true,
+                       /** Soft-DPHY MISC + byte2pixel debug_signals ports (b2p attach_bus). */
+                       enable_misc_signals : Boolean = true
                  ) extends Component {
   val io = new Bundle {
     val mipi = slave(MIPIIO(cfg.numRXLanes))
@@ -38,6 +48,11 @@ case class MIPIToPixel(cfg : MIPIConfig,
     val frame_valid = out Bool()
 
     val dphy_lmmi = with_lmmi generate slave(LMMI(8, 8))
+
+    /** Soft-DPHY recovered HS byte clock (ClockMeasure / debug mux). */
+    val clk_byte_hs = with_error_pulses generate (out Bool())
+    /** Error/activity rises PulseCC'd into this component's clock. */
+    val errorPulses = with_error_pulses generate out(new CsiErrorPulses())
   }
   val byte_freq = cfg.dphyByteFreq
 
@@ -56,6 +71,10 @@ case class MIPIToPixel(cfg : MIPIConfig,
     is_continous_clock = is_continous_clock,
     with_lmmi = with_lmmi,
     with_rx_fifo = with_rx_fifo,
+    enable_crc_check = enable_crc_check,
+    with_lane_align = with_lane_align,
+    enable_logging = enable_logging,
+    enable_misc_signals = enable_misc_signals,
     cfg_datsettle_cyc = with_lmmi,
     cfg_fifo_read_delay = with_lmmi && with_rx_fifo,
   )
@@ -114,6 +133,23 @@ case class MIPIToPixel(cfg : MIPIConfig,
 
   def attach_b2p_bus(busSlaveFactory: BusIf): Unit = {
     bytes_to_pixels.attach_bus(busSlaveFactory)
+  }
+
+  if (with_error_pulses) {
+    io.clk_byte_hs := mipi_to_bytes.io.clk_byte_hs_o
+    io.errorPulses := mipi_to_bytes.errorPulsesInByteClock().pulseCc(
+      byte_clock_domain(), ClockDomain.current)
+  }
+
+  /** Byte-clock rises PulseCC'd into this component's clock. */
+  def errorPulsesSys(clockOut: ClockDomain = ClockDomain.current): CsiErrorPulses = {
+    require(with_error_pulses, "errorPulsesSys requires with_error_pulses")
+    io.errorPulses
+  }
+
+  def clkByteHs: Bool = {
+    require(with_error_pulses, "clkByteHs requires with_error_pulses")
+    io.clk_byte_hs
   }
 
   /** Attach Soft-DPHY CSI CSRs then byte2pixel debug counters on the same BusIf. */
