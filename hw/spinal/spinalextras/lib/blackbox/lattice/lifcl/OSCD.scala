@@ -69,6 +69,14 @@ class OSCD(cfg: OSCDConfig) extends BlackBox {
     })
     Constraints.add_clock_group(true, clocks.map(_.readClockWire):_*)
   })
+
+  /**
+   * Route fabric LMMI clock/reset through CONFIG_CLKRST_CORE so CONFIG_LMMI
+   * meets Nexus physical-routing rules (same wiring as Radiant OSC IP).
+   */
+  def attachLmmi(lmmiClk: Bool, lmmiResetn: Bool): CONFIG_CLKRST_CORE = {
+    CONFIG_CLKRST_CORE(io.HFCLKCFG, lmmiClk, lmmiResetn, io.HFSDCOUT)
+  }
 }
 
 object OSCD {
