@@ -16,6 +16,7 @@ import spinalextras.lib.formal._
 import spinalextras.lib.formal.fillins.Wishbone._
 import spinalextras.lib.formal.fillins.PipelinedMemoryBusFormal._
 import spinalextras.lib.misc.StreamFragmentWidthAdapterWithOccupancy
+import spinalextras.lib.soc.peripherals.XipOffsetContext
 import vexriscv.ip.DataCacheMemBus
 import vexriscv.plugin.IBusSimpleBus
 import vexriscv.ip.InstructionCacheMemBus
@@ -275,10 +276,12 @@ package object bus {
 
   MultiInterconnectConnectFactory.AddHandler { case (m: PipelinedMemoryBusMultiBus, s: XipBusExt) => new Composite(m.bus, "to_xip") with HasFormalProperties {
     val wordWidth = (m.bus.cmd.data.getWidth / 8)
-    m.bus.cmd.discardWhen(m.bus.cmd.write).map(c => {
+    val byteLast = U(wordWidth - 1, 8 bits)
+    val (nor, overflow) = XipOffsetContext.fromCpu(m.bus.cmd.address, byteLast)
+    m.bus.cmd.discardWhen(m.bus.cmd.write || overflow).map(c => {
       val cmd = cloneOf(s.bus.cmd.payload)
-      cmd.address := c.address.resized//(c.address << log2Up(m.bus.config.dataWidth / 8)).resized
-      cmd.length := m.bus.config.dataWidth / 8 - 1
+      cmd.address := nor.resized
+      cmd.length := wordWidth - 1
       cmd
     }) >> s.bus.cmd
 
@@ -300,22 +303,34 @@ package object bus {
 
   MultiInterconnectConnectFactory.AddHandler { case (m: DBusSimpleBusExt, s: XipBusExt) => new Composite(m.bus, "to_xip") with HasFormalProperties {
     val wordWidth = (m.bus.cmd.data.getWidth / 8)
+    val wordShift = log2Up(m.bus.cmd.address.getWidth / 8)
+    val aligned = (m.bus.cmd.address >> wordShift) << wordShift
+    val byteLast = U(wordWidth - 1, 8 bits)
+    val (nor, overflow) = XipOffsetContext.fromCpu(aligned, byteLast)
+    val errPend = RegInit(False)
 
-    m.bus.cmd.throwWhen(m.bus.cmd.wr).map(c => {
-      val wordShift = log2Up(c.address.getWidth / 8)
-      val cmd = cloneOf(s.bus.cmd.payload)
-      cmd.address := ((c.address >> wordShift) << wordShift).resized //(c.address << log2Up(m.bus.config.dataWidth / 8)).resized
-      cmd.length := wordWidth - 1
-      cmd
-    }) >> s.bus.cmd
+    s.bus.cmd.valid := m.bus.cmd.valid && !m.bus.cmd.wr && !overflow && !errPend
+    s.bus.cmd.address := nor.resized
+    s.bus.cmd.length := wordWidth - 1
+    m.bus.cmd.ready := Mux(m.bus.cmd.wr || (overflow && !errPend), True, s.bus.cmd.ready && !errPend)
+    when(m.bus.cmd.fire && overflow && !m.bus.cmd.wr) {
+      errPend := True
+    }
 
     val output = Stream(Fragment(Bits(m.bus.cmd.data.getWidth bits)))
     val adapater = StreamFragmentWidthAdapterWithOccupancy(s.bus.rsp, output)
 
     output.ready := True
-    m.bus.rsp.ready := output.valid
-    m.bus.rsp.data := output.payload.fragment
-    m.bus.rsp.error := False
+    when(errPend) {
+      m.bus.rsp.ready := True
+      m.bus.rsp.error := True
+      m.bus.rsp.data.assignDontCare()
+      errPend := False
+    } otherwise {
+      m.bus.rsp.ready := output.valid
+      m.bus.rsp.data := output.payload.fragment
+      m.bus.rsp.error := False
+    }
 
     override protected def formalProperties() = new FormalProperties(this) {
       val xipReads = (new XipBusFormal(s.bus).contract.outstandingReads.asUInt +^ adapater.io.occupancy)
@@ -325,22 +340,34 @@ package object bus {
 
   MultiInterconnectConnectFactory.AddHandler { case (m: DataCacheMemBusExt, s: XipBusExt) => new Composite(m.bus, "to_xip") with HasFormalProperties {
     val wordWidth = (m.bus.cmd.data.getWidth / 8)
+    val wordShift = log2Up(m.bus.cmd.address.getWidth / 8)
+    val aligned = (m.bus.cmd.address >> wordShift) << wordShift
+    val byteLast = U(wordWidth - 1, 8 bits)
+    val (nor, overflow) = XipOffsetContext.fromCpu(aligned, byteLast)
+    val errPend = RegInit(False)
 
-    m.bus.cmd.throwWhen(m.bus.cmd.wr).map(c => {
-      val wordShift = log2Up(c.address.getWidth / 8)
-      val cmd = cloneOf(s.bus.cmd.payload)
-      cmd.address := ((c.address >> wordShift) << wordShift).resized //(c.address << log2Up(m.bus.config.dataWidth / 8)).resized
-      cmd.length := wordWidth - 1
-      cmd
-    }) >> s.bus.cmd
+    s.bus.cmd.valid := m.bus.cmd.valid && !m.bus.cmd.wr && !overflow && !errPend
+    s.bus.cmd.address := nor.resized
+    s.bus.cmd.length := wordWidth - 1
+    m.bus.cmd.ready := Mux(m.bus.cmd.wr || (overflow && !errPend), True, s.bus.cmd.ready && !errPend)
+    when(m.bus.cmd.fire && overflow && !m.bus.cmd.wr) {
+      errPend := True
+    }
 
     val output = Stream(Fragment(Bits(m.bus.cmd.data.getWidth bits)))
     val adapater = StreamFragmentWidthAdapterWithOccupancy(s.bus.rsp, output)
 
     output.ready := True
-    m.bus.rsp.valid := output.valid
-    m.bus.rsp.data := output.payload.fragment
-    m.bus.rsp.error := False
+    when(errPend) {
+      m.bus.rsp.valid := True
+      m.bus.rsp.error := True
+      m.bus.rsp.data.assignDontCare()
+      errPend := False
+    } otherwise {
+      m.bus.rsp.valid := output.valid
+      m.bus.rsp.data := output.payload.fragment
+      m.bus.rsp.error := False
+    }
 
     override protected def formalProperties() = ???
   }}
@@ -351,23 +378,36 @@ package object bus {
   }
 
   MultiInterconnectConnectFactory.AddHandler { case (m: InstructionCacheMemBusExt, s: XipBusExt) => new Composite(m.bus, "to_xip"){
-    m.bus.cmd.map(c => {
-      val wordShift = log2Up(c.address.getWidth / 8)
-      val cmd = cloneOf(s.bus.cmd.payload)
-      cmd.address := ((c.address >> wordShift) << wordShift).resized //(c.address << log2Up(m.bus.config.dataWidth / 8)).resized
-      cmd.length := (m.bus.cmd.p.burstSize << log2Up(m.bus.p.memDataWidth / 8)) - 1
-      cmd
-    }) >> s.bus.cmd
+    val burstBytes = m.bus.cmd.p.burstSize << log2Up(m.bus.p.memDataWidth / 8)
+    val wordShift = log2Up(m.bus.cmd.address.getWidth / 8)
+    val aligned = (m.bus.cmd.address >> wordShift) << wordShift
+    val byteLast = U(burstBytes - 1, 8 bits)
+    val (nor, overflow) = XipOffsetContext.fromCpu(aligned, byteLast)
+    val errLeft = Reg(UInt(log2Up(m.bus.p.burstSize + 1) bits)) init 0
+    val errBusy = errLeft =/= 0
+
+    s.bus.cmd.valid := m.bus.cmd.valid && !overflow && !errBusy
+    s.bus.cmd.address := nor.resized
+    s.bus.cmd.length := U(burstBytes - 1)
+    m.bus.cmd.ready := Mux(overflow && !errBusy, True, s.bus.cmd.ready && !errBusy)
+    when(m.bus.cmd.fire && overflow) {
+      errLeft := m.bus.p.burstSize
+    }
 
     val output = Stream(Fragment(Bits(m.bus.p.memDataWidth bits)))
     StreamFragmentWidthAdapter(s.bus.rsp, output)
+    output.ready := True
 
-    output.map(r => {
-      val rsp = cloneOf(m.bus.rsp.payload)
-      rsp.data := r.fragment
-      rsp.error := False
-      rsp
-    }).toFlow >> m.bus.rsp
+    when(errBusy) {
+      m.bus.rsp.valid := True
+      m.bus.rsp.error := True
+      m.bus.rsp.data.assignDontCare()
+      errLeft := errLeft - 1
+    } otherwise {
+      m.bus.rsp.valid := output.valid
+      m.bus.rsp.data := output.payload.fragment
+      m.bus.rsp.error := False
+    }
   }}
 
   MultiInterconnectConnectFactory.AddHandler { case (m: InstructionCacheMemBusExt, s: PipelinedMemoryBusMultiBus) => {
