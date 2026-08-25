@@ -659,11 +659,10 @@ class PLL(val cfg: PLLConfig) extends BlackBox with spinalextras.lib.clocking.PL
   }
 
   addPrePopTask( () => {
-    Constraints.create_clock(io.REFCK, ClockDomain.current.frequency.getValue)
-    io.CLKS.map(cfg_clk => {
-      Constraints.create_clock(cfg_clk._2, cfg_clk._1.ACTUAL_FREQ Hz)
-    })
-    Constraints.add_clock_group(true, io.CLKS.map(_._2):_*)
+    val refFreq = ClockDomain.current.frequency.getValue
+    io.CLKS.foreach { case (cfg, clk) =>
+      Constraints.create_generated_clock(clk, io.REFCK, cfg.ACTUAL_FREQ Hz, refFreq)
+    }
   })
   override def inputSpecification: ClockSpecification = ???
   override def outputSpectifications: Seq[ClockSpecification] = this.cfg.OUTPUT_CLKS.map(_.specification)

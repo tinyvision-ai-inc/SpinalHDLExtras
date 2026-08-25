@@ -9,6 +9,7 @@ import scala.collection.mutable.ArrayBuffer
 
 class Constraints {
   val clocks = new mutable.ArrayBuffer[(Data, HertzNumber)]()
+  val generated_clocks = new mutable.ArrayBuffer[(Data, Data, Long, Long)]()
   val max_skews = new mutable.ArrayBuffer[(Seq[Data], TimeNumber)]()
   val clock_groups = new mutable.ArrayBuffer[(Seq[Data], Boolean)]()
   val constraints = new mutable.ArrayBuffer[(Seq[Data], Map[String, String])]()
@@ -22,8 +23,19 @@ class Constraints {
     false_path_all_clocks = true
   }
 
-  private def clockNameFor(data: Data): String = {
-    data.getRtlPath().replace('/', '_')
+  private def portLeaf(data: Data): String = {
+    data.getRtlPath().split('/').last.replaceAll("\\[.*\\]", "")
+  }
+
+  private def isToplevelPort(data: Data, toplevel: Component): Boolean = {
+    val leaf = portLeaf(data)
+    toplevel.getAllIo.exists(_.getName() == leaf)
+  }
+
+  private def clockNameFor(data: Data, toplevel: Component): String = {
+    val leaf = portLeaf(data)
+    if (isToplevelPort(data, toplevel)) leaf
+    else data.getRtlPath().replace('/', '_')
   }
 
   /** Tcl object query for a clock net/pin/port in the emitted Verilog hierarchy. */
@@ -36,7 +48,45 @@ class Constraints {
     }
   }
 
+  private def generatedClockDest(dest: Data, toplevel: Component): String = {
+    if (isToplevelPort(dest, toplevel)) {
+      s"[get_ports {${portLeaf(dest)}}]"
+    } else {
+      val parts = dest.getRtlPath().split('/')
+      if (parts.length >= 2) {
+        s"[get_nets -hierarchical {*${parts.head}_${parts.last}}]"
+      } else {
+        clockTarget(dest, toplevel)
+      }
+    }
+  }
+
+  private def generatedClockSource(source: Data, toplevel: Component): String = {
+    if (toplevel.getAllIo.exists(_.getName() == "clk")) {
+      "[get_ports {clk}]"
+    } else {
+      clockTarget(source, toplevel)
+    }
+  }
+
+  private def hierarchicalClockTarget(data: Data, toplevel: Component): String = {
+    val path = data.getRtlPath()
+    if (data.component == toplevel) {
+      s"[get_ports {$path}]"
+    } else {
+      s"[get_pins -hierarchical {*/$path}]"
+    }
+  }
+
   private def netWildcard(path: String): String = s"[get_nets {${path}/*}]"
+
+  private def leftoverNetWildcard(path: String): String =
+    s"[get_nets -hierarchical {*$path/*}]"
+
+  private def skipDuplicateJtagClock(data: Data, toplevel: Component): Boolean = {
+    data.getRtlPath().endsWith("jtag_tck") &&
+      toplevel.getAllIo.exists(_.getName() == "jtag_tck")
+  }
 
   def write_file[T <: Component](report: SpinalReport[T], path : String): Unit = {
     val file = new PrintWriter(path)
@@ -56,13 +106,59 @@ class Constraints {
     }
 
     for ((data, freq) <- clocks) {
-      val cname = clockNameFor(data)
-      file.println(s"# ${cname} ${freq.decompose}")
-      file.println(s"create_clock -name {${cname}} -period ${freq.toTime.toDouble * 1e9} ${clockTarget(data, report.toplevel)}")
+      if (skipDuplicateJtagClock(data, report.toplevel)) {
+        file.println(s"# skip ${clockNameFor(data, report.toplevel)} (board jtag_tck)")
+      } else {
+        val cname = clockNameFor(data, report.toplevel)
+        file.println(s"# ${cname} ${freq.decompose}")
+        file.println(s"create_clock -name {${cname}} -period ${freq.toTime.toDouble * 1e9} ${hierarchicalClockTarget(data, report.toplevel)}")
+      }
     }
 
-    // Jitter / PLL / board uncertainty applied to every declared clock.
+    for ((dest, source, mul, div) <- generated_clocks) {
+      val cname = clockNameFor(dest, report.toplevel)
+      file.println(s"create_generated_clock -name {${cname}} -source ${generatedClockSource(source, report.toplevel)} -multiply_by ${mul} -divide_by ${div} ${generatedClockDest(dest, report.toplevel)}")
+    }
+
+    def hasPort(n: String) = report.toplevel.getAllIo.exists(_.getName() == n)
+    def presentPorts(ns: String*) = ns.filter(hasPort)
+
+    if (hasPort("jtag_tck")) {
+      file.println("create_clock -name {jtag_tck} -period 100 [get_ports {jtag_tck}]")
+    }
+
     file.println("set_clock_uncertainty 0.125 [all_clocks]")
+
+    for (n <- presentPorts("led", "uart_txd")) {
+      file.println(s"set_false_path -to [get_ports {$n}]")
+    }
+    for (n <- presentPorts("uart_rxd")) {
+      file.println(s"set_false_path -from [get_ports {$n}]")
+    }
+    for (n <- presentPorts("scl", "sda")) {
+      file.println(s"set_false_path -from [get_ports {$n}]")
+      file.println(s"set_false_path -to [get_ports {$n}]")
+    }
+    if (hasPort("jtag_tck")) {
+      for (n <- presentPorts("jtag_tdi", "jtag_tms")) {
+        file.println(s"set_input_delay -clock [get_clocks {jtag_tck}] -max 10.0 [get_ports {$n}]")
+        file.println(s"set_input_delay -clock [get_clocks {jtag_tck}] -min 2.0 [get_ports {$n}]")
+      }
+      if (hasPort("jtag_tdo")) {
+        file.println("set_output_delay -clock [get_clocks {jtag_tck}] -max 10.0 [get_ports {jtag_tdo}]")
+        file.println("set_output_delay -clock [get_clocks {jtag_tck}] -min 2.0 [get_ports {jtag_tdo}]")
+      }
+    }
+    if (hasPort("spiflash_clk") && hasPort("spiflash_dq")) {
+      file.println("set_input_delay -clock [get_clocks {spiflash_clk}] -clock_fall -max 6.0 [get_ports {spiflash_dq*}]")
+      file.println("set_input_delay -clock [get_clocks {spiflash_clk}] -clock_fall -min 1.5 [get_ports {spiflash_dq*}]")
+      file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -max 2.0 [get_ports {spiflash_dq*}]")
+      file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -min -3.0 [get_ports {spiflash_dq*}]")
+    }
+    if (hasPort("spiflash_clk") && hasPort("spiflash_cs_n")) {
+      file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -max 5.0 [get_ports {spiflash_cs_n}]")
+      file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -min -3.0 [get_ports {spiflash_cs_n}]")
+    }
 
     //    for ((clks, async) <- clock_groups) {
     //      file.println(s"set_clock_groups ${clks.map("-group [get_clocks {" + _.name +"}]").mkString(" ")} ${if(async) "-asynchronous" else ""}")
@@ -82,29 +178,45 @@ class Constraints {
       file.println(s"set_false_path -through ${netWildcard(d.getRtlPath())}")
     }
 
-    def set_false_path_component(d : Component): Unit = {
-      file.println(s"set_false_path -through ${netWildcard(d.getRtlPath())}")
+    val leftoverCdc = new ArrayBuffer[Component]()
+    val leftoverFifoRam = new ArrayBuffer[Component]()
+    def markCdc(c: Component): Unit = {
+      Constraints.keep_chain(c)
+      if (!Constraints.cdcGlobCovers(c.getRtlPath())) {
+        leftoverCdc += c
+      }
     }
-
     for(false_path <- false_paths) {
       set_false_path(false_path)
     }
 
     report.toplevel.walkComponents {
       case c: StreamFifoCC[_] => {
-        set_false_path_component(c)
+        Constraints.keep_chain(c)
+        if (!Constraints.fifoRamGlobCovers(c.getRtlPath())) {
+          leftoverFifoRam += c
+        }
       }
-      case c: BufferCC[_] => {
-        set_false_path_component(c)
-      }
-      case c: StreamCCByToggle[_] => {
-        set_false_path_component(c)
-      }
-      case c: FlowCCUnsafeByToggle[_] => {
-        set_false_path_component(c)
-      }
+      case c: BufferCC[_] => markCdc(c)
+      case c: StreamCCByToggle[_] => markCdc(c)
+      case c: FlowCCByToggle[_] => markCdc(c)
+      case c: FlowCCUnsafeByToggle[_] => markCdc(c)
       case c: Component => {}
     }
+
+    for (g <- Constraints.cdcNetGlobs) {
+      file.println(s"set_false_path -through [get_nets -hierarchical {$g}]")
+    }
+    for (c <- leftoverCdc) {
+      file.println(s"set_false_path -through ${leftoverNetWildcard(c.getRtlPath())}")
+    }
+    for (g <- Constraints.fifoRamPinGlobs) {
+      file.println(s"set_false_path -to [get_pins -hierarchical {$g}]")
+    }
+    for (c <- leftoverFifoRam) {
+      file.println(s"set_false_path -to [get_pins -hierarchical {${c.getRtlPath()}/${Constraints.fifoRamPinLeaf}}]")
+    }
+    file.println("set_false_path -to [get_pins -hierarchical {*asyncAssertSyncDeassert_buffercc*/*.ff_inst/LSR}]")
 
     for ((datas, tags) <- constraints) {
       for(data <- datas) {
@@ -126,6 +238,30 @@ object Constraints {
   var constraints = new Constraints
 
   var toplevel : Component = null
+
+  val cdcNetGlobs = Seq(
+    "*buffercc*/*",
+    "*bufferCC*/*",
+    "*streamCCByToggle*/*",
+    "*flowCCUnsafeByToggle*/*"
+  )
+
+  val fifoRamPinLeaf = "ram_spinal_port1*/DF"
+  val fifoRamPinGlobs = Seq(s"*streamFifoCC*/$fifoRamPinLeaf")
+
+  def globToRegex(glob: String): String = {
+    glob.split("\\*", -1).map(java.util.regex.Pattern.quote).mkString(".*")
+  }
+
+  def cdcGlobCovers(rtlPath: String): Boolean = {
+    val probe = rtlPath + "/x"
+    cdcNetGlobs.exists(g => probe.matches(globToRegex(g)))
+  }
+
+  def fifoRamGlobCovers(rtlPath: String): Boolean = {
+    val probe = rtlPath + "/ram_spinal_port1.ff_inst/DF"
+    fifoRamPinGlobs.exists(g => probe.matches(globToRegex(g)))
+  }
 
   def addAttributeIfNeeded(d : Component, n : String, v : String): Unit = {
     if (!d.getTagsOf[Attribute].exists(a => a.getName == n)) {
@@ -169,6 +305,9 @@ object Constraints {
       case c: StreamCCByToggle[_] => {
         fn(c)
       }
+      case c: FlowCCByToggle[_] => {
+        fn(c)
+      }
       case c: FlowCCUnsafeByToggle[_] => {
         fn(c)
       }
@@ -203,6 +342,14 @@ object Constraints {
   def create_clock(d: Data, f: HertzNumber) = {
     check()
     constraints.clocks.append((d, f))
+  }
+
+  def create_generated_clock(dest: Data, source: Data, destFreq: HertzNumber, sourceFreq: HertzNumber): Unit = {
+    check()
+    val fromHz = math.round(sourceFreq.toDouble)
+    val toHz = math.round(destFreq.toDouble)
+    val g = BigInt(fromHz).gcd(BigInt(toHz)).toLong
+    constraints.generated_clocks.append((dest, source, toHz / g, fromHz / g))
   }
   def set_max_skew(max_skew: TimeNumber, d: Data*) = {
     check()
