@@ -121,7 +121,7 @@ A MIPI D-PHY/CSI-2 pixel pipeline: `MIPIConfig`/`MIPIIO` (PHY-level config and I
   `I2cMaster`) with a simulation model.
 - **`lib/soc/peripherals`** — APB3-wrapped peripherals for SpineX: timer, UART (custom and
   `UART16550`), I2C, a system configuration/control block (`SpinexConfigCtrl`), and QSPI XIP flash
-  (`XipFlashPlugin`).
+  (`XipFlashPlugin`; register map in [`docs/flash-controller.md`](docs/flash-controller.md)).
 
 ## SpineX SoC (`lib/soc`)
 
@@ -134,7 +134,9 @@ A configurable RISC-V SoC (VexRiscv core) with a plugin-based peripheral archite
   `JTagPlugin`, `EventLoggerPlugin`, `IdentificationPlugin`.
 - **`lib/soc/bus/WishbonePlugin`** — Wishbone bus attachment for the SoC.
 - **`CSREventManager`** — a control/status-register-driven event manager.
-- **`DeviceTree`** — builds a device tree blob describing the assembled SoC for firmware/Linux.
+- **`DeviceTree`** — builds a device tree overlay (`{design}.overlay`) describing the assembled SoC.
+  Flash CSRs including `xip_offset` are emitted by `XipFlashPlugin`; see
+  [`docs/flash-controller.md`](docs/flash-controller.md).
 - **`SpinexSim`** — simulation entry point for the SoC.
 
 ## IP Generation & Build Tooling (`lib/ipgen`, `lib/impl`)

@@ -1,17 +1,43 @@
 package spinalextras.lib.soc.peripherals
 
 import spinal.core._
+import spinal.lib.bus.amba3.apb.{Apb3, Apb3CC}
 import spinal.lib.bus.misc.SizeMapping
 import spinal.lib.com.spi.ddr.{Apb3SpiXdrMasterCtrl, SpiXdrMasterCtrl, SpiXdrParameter}
 import spinal.lib.com.spi.ddr.SpiXdrMasterCtrl.{MemoryMappingParameters, XipBus}
 import spinalextras.lib.Constraints
 import spinalextras.lib.io.TristateBuffer
 import spinalextras.lib.misc.GlobalSignals
-import spinalextras.lib.soc.spinex.{Spinex, SpinexPlugin}
+import spinalextras.lib.soc.DeviceTree
+import spinalextras.lib.soc.spinex.{Spinex, SpinexRegisterFilePlugin}
 
 import scala.language.postfixOps
 
 object XipFlashPlugin {
+  /** APB CSRs (byte offsets from flashctrl base). Last used address is 0x58. */
+  val csrWindowSize = 0x5c
+  /** NOR program page / sector; consumed by Zephyr `soc-nv-flash`. */
+  val writeBlockSize = 32
+  val eraseBlockSize = 0x1000
+  val registers: Seq[(String, Int)] = Seq(
+    ("data", 0x00),
+    ("buffer", 0x04),
+    ("config", 0x08),
+    ("interrupt", 0x0C),
+    ("clk_divider", 0x20),
+    ("ss_setup", 0x24),
+    ("ss_hold", 0x28),
+    ("ss_disable", 0x2C),
+    ("ss_active", 0x30),
+    ("xip_enable", 0x40),
+    ("xip_instr", 0x44),
+    ("xip_mod", 0x48),
+    ("xip_offset", XipOffset.csrAddr),
+    ("data32", 0x50),
+    ("data32_rw", 0x54),
+    ("data32_rsp", 0x58)
+  )
+
   val defaultConfig = SpiXdrMasterCtrl.MemoryMappingParameters(
     SpiXdrMasterCtrl.Parameters(8, 12, SpiXdrParameter(
         dataWidth = 4,
@@ -42,7 +68,34 @@ case class XipFlashPlugin(config: MemoryMappingParameters = XipFlashPlugin.defau
                           memoryMapping : SizeMapping = SizeMapping(0x20000000L, 0x01000000),
                           registerMapping : SizeMapping = SizeMapping(0x01000, 1 KiB),
                           var clockDomain : ClockDomain = ClockDomain.current,
-                          name : String = "spiflash") extends SpinexPlugin {
+                          name : String = "spiflash",
+                          xipLinkBase : BigInt = XipOffset.linkBase,
+                          xipResetOffset : BigInt = XipOffset.resetOffset,
+                          xipFlashSize : BigInt = XipOffset.flashSize)
+  extends SpinexRegisterFilePlugin("/soc/flashctrl",
+    SizeMapping(0xe0000000L + registerMapping.base, XipFlashPlugin.csrWindowSize)) {
+
+  override val compatible: Seq[String] = Seq("tinyvision,flash")
+
+  /** Zephyr SoC node: label `flashctrl`, unit name `flash-controller@…`. */
+  override def entryName: String =
+    s"flashctrl: flash-controller@${regBase.toString(16)}"
+
+  override def regs: Seq[(String, SizeMapping)] =
+    ("base" -> SizeMapping(0, XipFlashPlugin.csrWindowSize)) +:
+      XipFlashPlugin.registers.map { case (n, off) => n -> SizeMapping(off, 4) }
+
+  override def appendDeviceTree(dt: DeviceTree): Unit = {
+    super.appendDeviceTree(dt)
+
+    val xipPath = baseEntryPath :+ s"flash0: flash@${memoryMapping.base.toString(16)}"
+    dt.addEntry("""compatible = "soc-nv-flash";""", xipPath: _*)
+    dt.addEntry("#address-cells = <1>;", xipPath: _*)
+    dt.addEntry("#size-cells = <0>;", xipPath: _*)
+    dt.addEntry(s"reg = <0x${memoryMapping.base.toString(16)} 0x${memoryMapping.size.toString(16)}>;", xipPath: _*)
+    dt.addEntry(s"write-block-size = <${XipFlashPlugin.writeBlockSize}>;", xipPath: _*)
+    dt.addEntry(s"erase-block-size = <0x${XipFlashPlugin.eraseBlockSize.toHexString}>;", xipPath: _*)
+  }
 
   lazy val spiflash_clk = out(Bool())
   lazy val spiflash_cs_n = out(Bool())
@@ -67,8 +120,6 @@ case class XipFlashPlugin(config: MemoryMappingParameters = XipFlashPlugin.defau
     val clockArea = new ClockingArea(if (clockDomain == null) ClockDomain.current else clockDomain) {
       val ctrl = Apb3SpiXdrMasterCtrl(config)
 
-      som.add_peripheral(ctrl.io.apb, registerMapping)
-
       val buffers = ctrl.io.spi.data.map(_ => TristateBuffer())
 
       for (i <- spiflash_dq.bitsRange) {
@@ -91,26 +142,31 @@ case class XipFlashPlugin(config: MemoryMappingParameters = XipFlashPlugin.defau
       ref_xip.rsp.queue(4, flashClockDomain, systemClockDomain) >> cc_xip.rsp
       cc_xip
     }
+
+    val pending = Reg(UInt(5 bits)) init 0
+    val pendingNext = pending +^ xip.cmd.fire.asUInt -^ xip.rsp.lastFire.asUInt
+    pending := pendingNext.resized
+    val xipIdle = pending === 0 && !xip.cmd.valid
+
+    val cpuApb = Apb3(Apb3SpiXdrMasterCtrl.getApb3Config)
+    val offsetApb = new XipOffsetApb(xipResetOffset)
+    offsetApb.io.up <> cpuApb
+    offsetApb.io.idle := xipIdle
+    if (systemClockDomain == clockArea.clockDomain) {
+      offsetApb.io.down <> clockArea.ctrl.io.apb
+    } else {
+      val cc = Apb3CC(cpuApb.config, systemClockDomain, clockArea.clockDomain)
+      cc.io.input <> offsetApb.io.down
+      cc.io.output <> clockArea.ctrl.io.apb
+    }
+    som.add_peripheral(cpuApb, registerMapping)
+    XipOffsetContext.bind(offsetApb.io.offset, xipLinkBase, xipFlashSize)
+
     som.add_slave(xip, "xip", memoryMapping, "iBus", "dBus")
 
-    Constraints.create_clock(spiflash_clk, clockDomain.frequency.getValue)
+    val srcClk = ClockDomain.current.readClockWire
+    val srcHz = ClockDomain.current.frequency.getValue
+    Constraints.create_generated_clock(spiflash_clk, srcClk, srcHz, srcHz)
     Constraints.set_max_skew(1 ns, spiflash_clk, spiflash_cs_n, spiflash_dq)
-
-    def spread(d: Data) = {
-      (0 to d.getBitsWidth).map(idx => s"${d.getRtlPath()}[${idx}]").mkString(" ")
-    }
-
-//    Constraints.add_verbatim(
-//      s"""
-//        |create_generated_clock -name ${spiflash_clk.name} -source [get_pins {${source_clock.getRtlPath()}}] -divide_by 2 [get_nets {${spiflash_clk.name}}]
-//        |
-//        |set_input_delay -clock [get_clocks ${spiflash_clk.name}] -clock_fall -min 1.5 [get_ports {${spread(spiflash_dq)}}]
-//        |set_input_delay -clock [get_clocks ${spiflash_clk.name}] -clock_fall -max 6.0 [get_ports {${spread(spiflash_dq)}}]
-//        |
-//        |set_output_delay -clock [get_clocks ${spiflash_clk.name}] -max 2.0 [get_ports {${spread(spiflash_dq)}}]
-//        |set_output_delay -clock [get_clocks ${spiflash_clk.name}] -min -3.0 [get_ports {${spread(spiflash_dq)}}]
-//        |set_output_delay -clock [get_clocks ${spiflash_clk.name}] -max 5.0 [get_ports {${spiflash_cs_n.getRtlPath()}}]
-//        |set_output_delay -clock [get_clocks ${spiflash_clk.name}] -min -3.0 [get_ports {${spiflash_cs_n.getRtlPath()}}]
-//        |""".stripMargin)
   }
 }
