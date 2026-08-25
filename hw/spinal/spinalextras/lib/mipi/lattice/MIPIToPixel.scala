@@ -62,8 +62,8 @@ case class MIPIToPixel(cfg : MIPIConfig,
   }
 
   noIoPrefix()
-  // No-LMMI Soft-DPHY hardcodes settle / pkt delay in the Soft-IP wrapper
-  // Only expose those parallel ports when LMMI is on (DYN_*).
+  // no-LMMI: DYN_DATSETTLE exposes rxcsr_datsettlecyc_i; CameraCsi maps it RW.
+  // pktdly stays IP-static (DYN_RXFIFO_PKTDLY off) unless LMMI.
   val mipi_to_bytes = new dphy_rx(cfg,
     sync_cd = sync_cd,
     byte_cd = byte_cd,
@@ -75,7 +75,7 @@ case class MIPIToPixel(cfg : MIPIConfig,
     with_lane_align = with_lane_align,
     enable_logging = enable_logging,
     enable_misc_signals = enable_misc_signals,
-    cfg_datsettle_cyc = with_lmmi,
+    cfg_datsettle_cyc = !with_lmmi,
     cfg_fifo_read_delay = with_lmmi && with_rx_fifo,
   )
   if(with_lmmi) {

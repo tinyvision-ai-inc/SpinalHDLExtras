@@ -143,6 +143,8 @@ class dphy_rx(cfg : MIPIConfig,
   }
 
   val default_datsettlecyc = cfg.dataSettleCyc.getOrElse(solve_datasettle(byte_freq, dphy_clk_freq))
+  /** Match Radiant no-LMMI RX_FIFO_PKT_DLY when the dyn pin is absent. */
+  val default_pktdly = if (cfg_has_fifo) dphy_rx.DefaultPktDly else 0
 
   val io = new Bundle {
     /** Soft-DPHY LMMI clock / reset (host / Wishbone domain). */
@@ -256,7 +258,7 @@ class dphy_rx(cfg : MIPIConfig,
 
     /** Parallel pktdly; Soft-DPHY LMMI variant uses LMMI regs 0x37/0x38 instead. */
     val rxcsr_rxfifo_pktdly_i =
-      (cfg_fifo_read_delay && cfg_has_fifo && _parallel_csr_ports) generate (in(UInt(16 bits)) default (1))
+      (cfg_fifo_read_delay && cfg_has_fifo && _parallel_csr_ports) generate (in(UInt(16 bits)) default (default_pktdly))
 
     def byte_clock_domain(): ClockDomain = {
       if(byte_cd == null) {
@@ -583,6 +585,11 @@ class dphy_rx(cfg : MIPIConfig,
           "Controls the tHS-SETTLE protocol timing parameter. Check the t-HSZERO parameter of the D-PHY transmitter to ensure the tHS-SETTLE setting can properly detect the Start-of-Transmit pattern.") init (default_datsettlecyc)
       GlobalSignals.externalize(io.rxcsr_datsettlecyc_i) :=
         crossClock(dphy_data_ctrl, dphy_data_settle, io.byte_clock_domain(), default_datsettlecyc)
+    } else {
+      val dphy_data_ctrl = busSlaveFactory.newRegAt(base + dphy_rx.OffDatSettle, "rxcsr_datsettlecyc")(SymbolName("rxcsr_datsettlecyc"))
+      val dphy_data_settle = dphy_data_ctrl.field(UInt(8 bits), RO,
+        "Soft-IP DATA_SETTLE_CYC (no DYN_DATSETTLE pin)")
+      dphy_data_settle := U(default_datsettlecyc, 8 bits)
     }
 
     if (enable_packet_parser) {
@@ -616,9 +623,14 @@ class dphy_rx(cfg : MIPIConfig,
     if (io.rxcsr_rxfifo_pktdly_i != null) {
       val pktdelay_ctrl = busSlaveFactory.newRegAt(base + dphy_rx.OffPktDly, "rxcsr_rxfifo_pktdly")(SymbolName("rxcsr_rxfifo_pktdly"))
       val pktdelay =
-        pktdelay_ctrl.field(io.rxcsr_rxfifo_pktdly_i.clone(), RW, "Packet delay on fifo") init (1)
+        pktdelay_ctrl.field(io.rxcsr_rxfifo_pktdly_i.clone(), RW, "Packet delay on fifo") init (default_pktdly)
       GlobalSignals.externalize(io.rxcsr_rxfifo_pktdly_i) :=
-        crossClock(pktdelay_ctrl, pktdelay, io.byte_clock_domain(), 1)
+        crossClock(pktdelay_ctrl, pktdelay, io.byte_clock_domain(), default_pktdly)
+    } else {
+      val pktdelay_ctrl = busSlaveFactory.newRegAt(base + dphy_rx.OffPktDly, "rxcsr_rxfifo_pktdly")(SymbolName("rxcsr_rxfifo_pktdly"))
+      val pktdelay = pktdelay_ctrl.field(UInt(16 bits), RO,
+        "Soft-IP RX_FIFO_PKT_DLY (no DYN_RXFIFO_PKTDLY pin)")
+      pktdelay := U(default_pktdly, 16 bits)
     }
 
     val _ = withErrorCounters
@@ -734,4 +746,6 @@ object dphy_rx {
   val WindowBytes = 0x100
   /** Wishbone window for Soft-DPHY LMMI (256 byte offsets × 4-byte word spacing). */
   val LmmiWindowBytes = 0x400
+  /** Radiant RX_FIFO_PKT_DLY for no-LMMI FIFO (create-radiant-project.py). */
+  val DefaultPktDly = 16
 }
