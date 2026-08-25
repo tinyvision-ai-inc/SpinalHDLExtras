@@ -70,11 +70,10 @@ class Constraints {
   }
 
   private def hierarchicalClockTarget(data: Data, toplevel: Component): String = {
-    val path = data.getRtlPath()
-    if (data.component == toplevel) {
-      s"[get_ports {$path}]"
+    if (isToplevelPort(data, toplevel)) {
+      s"[get_ports {${portLeaf(data)}}]"
     } else {
-      s"[get_pins -hierarchical {*/$path}]"
+      s"[get_pins -hierarchical {*/${data.getRtlPath()}}]"
     }
   }
 
@@ -127,6 +126,16 @@ class Constraints {
       file.println("create_clock -name {jtag_tck} -period 100 [get_ports {jtag_tck}]")
     }
 
+    if (hasPort("spiflash_clk")) {
+      val other = generated_clocks.map(t => clockNameFor(t._1, report.toplevel)).toBuffer
+      if (hasPort("clk")) {
+        other += "clk_in"
+      }
+      if (other.nonEmpty) {
+        file.println(s"set_clock_groups -asynchronous -group [get_clocks {spiflash_clk}] -group [get_clocks {${other.mkString(" ")}}]")
+      }
+    }
+
     file.println("set_clock_uncertainty 0.125 [all_clocks]")
 
     for (n <- presentPorts("led", "uart_txd")) {
@@ -158,6 +167,17 @@ class Constraints {
     if (hasPort("spiflash_clk") && hasPort("spiflash_cs_n")) {
       file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -max 5.0 [get_ports {spiflash_cs_n}]")
       file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -min -3.0 [get_ports {spiflash_cs_n}]")
+    }
+    if (hasPort("spiflash_clk")) {
+      // Config bits; mapper often has no timing arcs from these nets (TWR may still list the FF Q).
+      file.println("set_false_path -through [get_nets -hierarchical {*ctrl_io_config_kind_driver_cpol}]")
+      file.println("set_false_path -through [get_nets -hierarchical {*ctrl_io_config_kind_driver_cpha}]")
+    }
+    if (hasPort("led")) {
+      file.println("set_false_path -from [get_pins -hierarchical {*brightness_ret*/Q}]")
+    }
+    if (report.toplevel.getAllIo.exists(_.getName().contains("mipi"))) {
+      file.println("set_false_path -to [get_pins -hierarchical {*mipi_to_bytes_cd_d0_o_regNext/D}]")
     }
 
     //    for ((clks, async) <- clock_groups) {
@@ -216,7 +236,7 @@ class Constraints {
     for (c <- leftoverFifoRam) {
       file.println(s"set_false_path -to [get_pins -hierarchical {${c.getRtlPath()}/${Constraints.fifoRamPinLeaf}}]")
     }
-    file.println("set_false_path -to [get_pins -hierarchical {*asyncAssertSyncDeassert_buffercc*/*.ff_inst/LSR}]")
+    file.println("set_false_path -to [get_pins -hierarchical {*asyncAssertSyncDeassert_buffercc*/CD}]")
 
     for ((datas, tags) <- constraints) {
       for(data <- datas) {
@@ -246,8 +266,8 @@ object Constraints {
     "*flowCCUnsafeByToggle*/*"
   )
 
-  val fifoRamPinLeaf = "ram_spinal_port1*/DF"
-  val fifoRamPinGlobs = Seq(s"*streamFifoCC*/$fifoRamPinLeaf")
+  val fifoRamPinLeaf = "ram_spinal_port1*/D"
+  val fifoRamPinGlobs = Seq(s"*$fifoRamPinLeaf")
 
   def globToRegex(glob: String): String = {
     glob.split("\\*", -1).map(java.util.regex.Pattern.quote).mkString(".*")
@@ -259,7 +279,7 @@ object Constraints {
   }
 
   def fifoRamGlobCovers(rtlPath: String): Boolean = {
-    val probe = rtlPath + "/ram_spinal_port1.ff_inst/DF"
+    val probe = rtlPath + "/logic_ram_spinal_port1[0]/D"
     fifoRamPinGlobs.exists(g => probe.matches(globToRegex(g)))
   }
 

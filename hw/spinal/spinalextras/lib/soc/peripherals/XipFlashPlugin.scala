@@ -164,9 +164,7 @@ case class XipFlashPlugin(config: MemoryMappingParameters = XipFlashPlugin.defau
 
     som.add_slave(xip, "xip", memoryMapping, "iBus", "dBus")
 
-    val srcClk = ClockDomain.current.readClockWire
-    val srcHz = ClockDomain.current.frequency.getValue
-    Constraints.create_generated_clock(spiflash_clk, srcClk, srcHz, srcHz)
+    Constraints.create_clock(spiflash_clk, clockDomain.frequency.getValue)
     Constraints.set_max_skew(1 ns, spiflash_clk, spiflash_cs_n, spiflash_dq)
   }
 }
