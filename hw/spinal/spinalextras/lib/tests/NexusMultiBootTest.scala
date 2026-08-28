@@ -24,7 +24,14 @@ class NexusMultiBootTest extends AnyFunSuite {
     SimConfig.withConfig(Config.spinal).withVerilator.doSim(new ConfigLmmiCommandWriter()) { dut =>
       dut.clockDomain.forkStimulus(25 MHz)
       dut.io.lmmi.cmd.ready #= true
+      dut.io.lmmi.rsp.valid #= false
+      dut.io.lmmi.rsp.payload #= 0
       dut.io.start #= false
+      dut.io.startFw #= false
+      dut.io.fwNrd #= 0
+      dut.io.fwWr.valid #= false
+      dut.io.fwWr.payload #= 0
+      dut.io.rd.ready #= true
       dut.clockDomain.waitSampling(4)
 
       dut.io.start #= true
