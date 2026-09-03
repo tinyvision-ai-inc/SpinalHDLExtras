@@ -8,6 +8,7 @@ import spinalextras.lib.Config
 import spinalextras.lib.blackbox.lattice.lifcl.{DCS, OSCD, OSCDConfig}
 import spinalextras.lib.bus.GlobalBus
 import spinalextras.lib.misc.ClockSpecification
+import spinalextras.lib.soc.DiagramNet
 
 import scala.language.postfixOps
 
@@ -91,6 +92,21 @@ class ClockSelection(outputClocks: Seq[ClockSpecification], bootstrap : Boolean 
   }
 
   lazy val ClockDomains = clockDomains
+
+  {
+    val pllNamed = pll match {
+      case n: Nameable => n
+      case _ => null
+    }
+    DiagramNet.capturePll(
+      outputClocks,
+      clockDomains,
+      outputClocksRefIdx,
+      inputClockFrequency,
+      pllNamed,
+      ClockDomain.current.reset != null
+    )
+  }
 }
 
 object ClockSelection {

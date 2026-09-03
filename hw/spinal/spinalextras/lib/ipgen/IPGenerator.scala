@@ -14,12 +14,13 @@ import spinal.core._
 import spinal.lib.KeepAttribute
 import spinalextras.lib.{Config, Constraints}
 import spinalextras.lib.mipi.GenerateByte2Pixel
-import spinalextras.lib.misc.{HertzDeserializer, Obfuscater, TimeNumberDeserializer}
+import spinalextras.lib.misc.{HertzDeserializer, TimeNumberDeserializer}
 import spinalextras.lib.soc.spinex.Spinex
 
 import java.io.{ByteArrayInputStream, FileInputStream, FileReader, FileWriter, SequenceInputStream}
 import java.nio.file.{Files, OpenOption, Paths, StandardCopyOption}
 import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 import scala.reflect.{ClassTag, classTag}
 
 case class IPGeneratorOptions(device: Device = Device(vendor = "lattice", family = "lifcl"),
@@ -150,6 +151,12 @@ abstract class IPGenerator_[CFG : ClassTag] extends IPGenerator {
   }
 
   def SpinalConfig(options: IPGeneratorOptions, cfg : CFG): SpinalConfig = {
+    // Clone phases: case-class copy shares the ArrayBuffer with Config.spinal.
+    val phases = ArrayBuffer[spinal.core.internals.Phase]()
+    phases ++= Config.spinal.transformationPhases
+    if (options.obfuscate) {
+      phases += new Constraints.PhaseObfuscater
+    }
     Config.spinal.copy(
       device = options.device,
       targetDirectory = options.output_dir,
@@ -158,7 +165,8 @@ abstract class IPGenerator_[CFG : ClassTag] extends IPGenerator {
         resetActiveLevel = LOW,
         resetKind = ASYNC
       ),
-      rtlHeader = Header(options, cfg)
+      rtlHeader = Header(options, cfg),
+      transformationPhases = phases
     )
   }
 
@@ -230,11 +238,6 @@ abstract class IPGenerator_[CFG : ClassTag] extends IPGenerator {
         if (options.instance_name.nonEmpty)
           top.setDefinitionName(options.sanitized_instance_name)
         top.noIoPrefix()
-        if (options.obfuscate) {
-          Obfuscater(top)
-        }
-        Constraints.keep_key_heirarchy(top)
-
         top.getAllIo.foreach(w => {
           val dir = w.getDirection match {
             case `in`    => "input"
@@ -263,7 +266,9 @@ abstract class IPGenerator_[CFG : ClassTag] extends IPGenerator {
          |""".stripMargin
     Files.write(Paths.get(f"${report.globalData.config.targetDirectory}/${report.toplevelName}_top.sv"), top_file.getBytes)
 
-    if(options.yosys_opt || options.obfuscate) {
+    // Yosys only when yosys_opt. Obfuscate is Spinal PhaseObfuscater alone —
+    // do not flatten/opt here or CDC get_cells / through-net globs go empty.
+    if (options.yosys_opt) {
       import scala.sys.process._
 
       val yosys_in_file =
@@ -272,12 +277,14 @@ abstract class IPGenerator_[CFG : ClassTag] extends IPGenerator {
           |hierarchy -top ${report.toplevelName}
           |tribuf
           |proc
-          |${if (options.obfuscate) "flatten" else ""}
+          |# Keep CDC anchors visible to SDC globs across opt.
+          |setattr -set keep_hierarchy 1 */c:cdc_*
+          |setattr -set keep 1 */c:cdc_*
           |peepopt
           |wreduce
           |opt -full
           |check
-          |write_verilog -decimal ${if (options.obfuscate) "-noattr" else ""} ${report.globalData.config.targetDirectory}/${report.toplevelName}.v
+          |write_verilog -decimal ${report.globalData.config.targetDirectory}/${report.toplevelName}.v
           |""".stripMargin
 
       val input = new ByteArrayInputStream(yosys_in_file.getBytes)
@@ -294,7 +301,7 @@ abstract class IPGenerator_[CFG : ClassTag] extends IPGenerator {
       }
     }
 
-    Spinex.generate_ipx(report)
+    Spinex.generate_ipx(report, obfuscate = options.obfuscate)
 
     {
       import scala.sys.process._
@@ -322,10 +329,7 @@ abstract class IPGenerator_[CFG : ClassTag] extends IPGenerator {
           "--sdc", sdc
         ).!
         if (exitCode != 0) {
-          if(!options.obfuscate)
-            sys.error(s"SDC constraints do not match generated Verilog for $top (see validate_sdc_paths.py)")
-          else
-            print(s"SDC constraints do not match generated Verilog for $top (see validate_sdc_paths.py)")
+          sys.error(s"SDC constraints do not match generated Verilog for $top (see validate_sdc_paths.py)")
         }
       }
     }
@@ -334,9 +338,6 @@ abstract class IPGenerator_[CFG : ClassTag] extends IPGenerator {
       config.generateVerilog({
         val top = simDut().setDefinitionName(options.sanitized_instance_name).noIoPrefix()
         top.noIoPrefix()
-        if (options.obfuscate) {
-          Obfuscater(top)
-        }
         top
       })
     }

@@ -18,8 +18,16 @@ object IPX {
         | <Package>
         |""".stripMargin)
 
-    for (elem <- report.generatedSourcesPaths) {
-      file.write(s"""  <File name="${elem.substring(report.globalData.config.targetDirectory.length + 1)}" type="top_level_verilog"/>\n""")
+    val names = report.generatedSourcesPaths.map { elem =>
+      elem.substring(report.globalData.config.targetDirectory.length + 1)
+    }
+    names.foreach { name =>
+      file.write(s"""  <File name="${name}" type="top_level_verilog"/>\n""")
+    }
+    // IPGenerator writes {top}_top.sv after SpinalReport; it is not in generatedSourcesPaths.
+    val topSv = s"${report.toplevelName}_top.sv"
+    if (!names.contains(topSv) && new File(s"${report.globalData.config.targetDirectory}/$topSv").exists()) {
+      file.write(s"""  <File name="${topSv}" type="top_level_verilog"/>\n""")
     }
 
     val sdc_file = s"${report.toplevelName}.sdc"

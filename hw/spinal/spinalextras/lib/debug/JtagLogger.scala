@@ -48,6 +48,7 @@ class JtagChain(device_count : Int) extends Component {
     val jtags = Array.fill(device_count)(master(Jtag()))
   }
   noIoPrefix()
+  Constraints.JtagPadClock(io.jtag.tck)
   Constraints.create_clock(io.jtag.tck, 12 MHz)
   Constraints.set_max_skew(10 ns, io.jtag.tck, io.jtag.tdi, io.jtag.tdo, io.jtag.tms)
 

@@ -147,7 +147,7 @@ trait GlobalBus[T <: IMasterSlave with Nameable with Bundle] extends BusSlavePro
     bus
   }
 
-  def add_bus_interface(name: String, mapping: SizeMapping, m2s_stage : Boolean, s2m_stage : Boolean, tags: String*): BusIf = {
+  override def add_bus_interface(name: String, mapping: SizeMapping, m2s_stage : Boolean, s2m_stage : Boolean, tags: String*): BusIf = {
     val busIf = shared_bus_interfaces.find(_._1.overlap(mapping)).map(_._2).getOrElse({
       val port = apply_staging(add_slave(name, mapping, tags:_*), m2s_stage, s2m_stage)
       bus_interface(port, mapping)

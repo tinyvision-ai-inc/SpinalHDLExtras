@@ -19,6 +19,7 @@ class JTagPlugin extends SpinexPlugin {
     jtagChain.io.jtag <> jtag
     som.io.valCallback(jtag, s"jtag")
 
+    Constraints.JtagPadClock(jtag.tck)
     Constraints.create_clock(jtag.tck, 12 MHz)
   }
 }

@@ -164,7 +164,13 @@ case class XipFlashPlugin(config: MemoryMappingParameters = XipFlashPlugin.defau
 
     som.add_slave(xip, "xip", memoryMapping, "iBus", "dBus")
 
-    Constraints.create_clock(spiflash_clk, clockDomain.frequency.getValue)
+    // sclkToggleInit=0: SCK toggles every controller cycle, so the pin is sysclk/2.
+    Constraints.create_generated_clock(
+      spiflash_clk,
+      clockDomain.readClockWire,
+      clockDomain.frequency.getValue / 2,
+      clockDomain.frequency.getValue
+    )
     Constraints.set_max_skew(1 ns, spiflash_clk, spiflash_cs_n, spiflash_dq)
   }
 }

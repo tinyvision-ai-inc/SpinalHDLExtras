@@ -2,6 +2,7 @@ package spinalextras.lib
 
 import spinal.core._
 import spinal.core.sim._
+import spinalextras.lib.Constraints.PhaseCdcAnchor
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -28,7 +29,7 @@ object Config {
     device = Device(vendor = "lattice", family = "lifcl"),
     //nameWhenByFile = true,
 
-  )//.addStandardMemBlackboxing(policy = blackboxAll)
+  ).addTransformationPhase(new PhaseCdcAnchor)
 
   def spinal = spinalConfig
 

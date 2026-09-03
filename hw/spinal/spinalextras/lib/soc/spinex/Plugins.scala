@@ -1,7 +1,9 @@
 package spinalextras.lib.soc.spinex
 
 import spinal.core._
+import spinal.lib._
 import spinal.lib.bus.misc.SizeMapping
+import spinal.lib.bus.simple.PipelinedMemoryBus
 import spinalextras.lib.bus.PipelinedMemoryBusExt
 import spinalextras.lib.memory.{HardwareMemory, Memories, MemoryRequirement}
 import spinalextras.lib.misc.RandomNumberGeneratorApb3
@@ -39,8 +41,15 @@ case class SystemRam(var name : String = "/soc/sram0", mapping : SizeMapping = S
       needsMask = true, label =name))
 
     val mem_pmbs = mem.pmbs()
-    som.add_slave(mem_pmbs(1).resizeAddress(32), "ram", mapping, direct = true, "dBus")
-    som.add_slave(mem_pmbs(0).resizeAddress(32), "ram", mapping, direct = true, "iBus")
+    val dBusRam = PipelinedMemoryBus(mem_pmbs(1).config)
+    mem_pmbs(1).cmd << dBusRam.cmd.stage()
+    dBusRam.rsp << mem_pmbs(1).rsp
+    som.add_slave(dBusRam.resizeAddress(32), "ram", mapping, direct = true, "dBus")
+
+    val iBusRam = PipelinedMemoryBus(mem_pmbs(0).config)
+    mem_pmbs(0).cmd << iBusRam.cmd.stage()
+    iBusRam.rsp << mem_pmbs(0).rsp
+    som.add_slave(iBusRam.resizeAddress(32), "ram", mapping, direct = true, "iBus")
   }
 
   def init_rom(filename : String): Unit = {

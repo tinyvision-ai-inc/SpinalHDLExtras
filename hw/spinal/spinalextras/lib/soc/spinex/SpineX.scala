@@ -17,7 +17,7 @@ import spinalextras.lib.lattice.IPX
 import spinalextras.lib.logging.{FlowLogger, GlobalLogger, SignalLogger}
 import spinalextras.lib.misc.AutoInterconnect.buildInterconnect
 import spinalextras.lib.misc.ClockSpecification
-import spinalextras.lib.soc.{DeviceTree, DeviceTreeProvider}
+import spinalextras.lib.soc.{DeviceTree, DeviceTreeProvider, DiagramNet}
 import spinalextras.lib.soc.spinex.plugins.{EventLoggerPlugin, JTagPlugin}
 import vexriscv.Riscv.{CSRRW, DIV, FENCE_I, MULH}
 import vexriscv.ip.{DataCacheMemBus, InstructionCacheMemBus}
@@ -430,7 +430,7 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
 
 
 object Spinex{
-  def generate_ipx[T <: Component](report : SpinalReport[T]): Unit = {
+  def generate_ipx[T <: Component](report : SpinalReport[T], obfuscate: Boolean = false): Unit = {
     val rtl_sourcess = Seq(
       "/blackbox/lattice/lifcl/BlackboxMemory.sv",
       "/opencores_i2c/rtl/verilog/i2c_master_bit_ctrl.v",
@@ -454,6 +454,7 @@ object Spinex{
 
     IPX.generate_ipx(report)
     DeviceTree.generate(report)
+    DiagramNet.generate(report, obfuscate)
   }
 
   def main(args: Array[String]) {
