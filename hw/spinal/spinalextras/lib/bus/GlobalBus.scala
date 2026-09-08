@@ -240,7 +240,21 @@ case class WishboneGlobalBus(config : WishboneConfig) extends GlobalBus[Wishbone
   def stage_bus(bus : Wishbone) : Wishbone = {
     WishboneStage(bus)
   }
-  override def bus_interface(port : Wishbone, mapping: SizeMapping) : WishboneBusInterface = WishboneBusInterface(port, mapping)
+  var decodeMissFlow: Flow[BusErrorEvent] = null
+
+  override def bus_interface(port : Wishbone, mapping: SizeMapping) : WishboneBusInterface = {
+    val bi = WishboneBusInterface(port, mapping)
+    bi.setReservedAddressErrorState(true)
+    bi.setReservedAddressReadValue(0xA5A5A5A5L)
+    if (BusError.loggingEnabled) {
+      val unimpl = Flow(BusErrorEvent())
+      unimpl.setName((if (port.name != null && port.name.nonEmpty) port.name else "wb") + "_unimpl")
+      unimpl.valid := (bi.doRead || bi.doWrite) && bi.bus_slverr
+      unimpl.payload.assign(bi.readAddress(), bi.doWrite, BusErrorMaster.DBus, BusErrorCause.UNIMPL, BusErrorSentinel.UNIMPL)
+      BusError.unimplTap(unimpl, BusErrorMaster.DBus)
+    }
+    bi
+  }
   override def slave_factory(port : Wishbone) = {
     if(port.ERR != null) {
       port.ERR := False
@@ -325,7 +339,12 @@ case class WishboneGlobalBus(config : WishboneConfig) extends GlobalBus[Wishbone
     if(missSlave.ERR != null)
       missSlave.ERR := True
     missSlave.ACK := True
-    missSlave.DAT_MISO := 0x9ABCDEF
+    missSlave.DAT_MISO := BusErrorSentinel.DECERR
+    val ev = Flow(BusErrorEvent())
+    ev.setName("wb_decode_miss")
+    ev.valid := missSlave.CYC && missSlave.STB && missSlave.ACK
+    ev.payload.assign(missSlave.ADR, missSlave.WE, BusErrorMaster.DBus, BusErrorCause.DECERR, BusErrorSentinel.DECERR)
+    decodeMissFlow = ev
   }
 
 }

@@ -8,7 +8,7 @@ import spinal.lib.com.spi.ddr.{SpiXdrMasterCtrl, SpiXdrParameter}
 import spinal.lib.com.uart.{UartCtrlGenerics, UartCtrlInitConfig, UartCtrlMemoryMappedConfig, UartParityType, UartStopType}
 import spinalextras.lib.soc.{DeviceTree, DeviceTreeProvider}
 import spinalextras.lib.soc.peripherals.{UartCtrlPlugin, XipFlashPlugin}
-import spinalextras.lib.soc.spinex.plugins.{I2CPlugin, IdentificationPlugin, JTagPlugin, OpenCoresI2CPlugin, TimerPlugin, Uart16550CtrlPlugin}
+import spinalextras.lib.soc.spinex.plugins.{BusErrorPlugin, BusErrorTestPlugin, I2CPlugin, IdentificationPlugin, JTagPlugin, OpenCoresI2CPlugin, TimerPlugin, Uart16550CtrlPlugin}
 import vexriscv.ip.fpu.FpuParameter
 import vexriscv.ip.{DataCacheConfig, InstructionCacheConfig}
 import vexriscv.{VexRiscv, plugin}
@@ -107,6 +107,13 @@ case class SpinexConfig(onChipRamSize      : BigInt,
     this.copy(plugins = this.plugins ++ extraPlugins)
   }
 
+  /** Keep [[BusErrorPlugin]] first so loggingEnabled is set before other BusIfs elaborate. */
+  def busErrorPluginFirst: SpinexConfig = {
+    val be = plugins.collect { case p: BusErrorPlugin => p }
+    if (be.isEmpty) this
+    else copy(plugins = be ++ plugins.filterNot(_.isInstanceOf[BusErrorPlugin]))
+  }
+
 }
 case class SpinexMulDivOptions(@JsonPropertyDescription("The unroll factor of the multiplication operation. Multiplication will take ~ 32 / unroll_factor cycles. Higher values impose greater timing restrictions. If set to none, a DSP resource is used instead which takes ~1 cycle and fewer gates.")
                                mulUnrollFactor : Option[BigInt] = Some(1),
@@ -126,7 +133,7 @@ object SpinexConfig{
     withUart = true,
     ram_mapping = SizeMapping(0x40000000L, 0x0004000 Bytes),
     rom_mapping = SizeMapping(0x20200000L, 0x00010000)
-  )
+  ).appendPlugins(new BusErrorTestPlugin())
 
   def default : SpinexConfig = default()
   def default(bigEndian : Boolean = false, withJtag : Boolean = true,
@@ -142,6 +149,9 @@ object SpinexConfig{
               )),
               hwFpu : Option[FpuParameter] = None,
               ram_name : String = "",
+              withBusErrorLogger : Boolean = true,
+              busErrorLogDepth : Int = 32,
+              busErrorLocalDepth : Int = 4,
               // Takes roughly 200 gates; but is much faster performance. 55 -> 73 c/s
               withFullBarrel : Boolean = false,
               icacheConfig : Option[InstructionCacheConfig] = Some(InstructionCacheConfig(
@@ -268,7 +278,7 @@ object SpinexConfig{
       rxFifoDepth = 16
     ),
     externalInterrupts = 8,
-    plugins = plugins(withJtag = withJtag, xipConfig, flashClockDomain, withUart = withUart, withI2C = withI2C, ram_mapping = ram_mapping, rom_mapping = rom_mapping, ram_name = ram_name)
+    plugins = plugins(withJtag = withJtag, xipConfig, flashClockDomain, withUart = withUart, withI2C = withI2C, ram_mapping = ram_mapping, rom_mapping = rom_mapping, ram_name = ram_name, withBusErrorLogger = withBusErrorLogger, busErrorLogDepth = busErrorLogDepth, busErrorLocalDepth = busErrorLocalDepth)
   )
 
   def fast = {
@@ -294,8 +304,13 @@ object SpinexConfig{
               ram_mapping : SizeMapping = SizeMapping(0x40000000l, 0x00010000 Bytes),
               rom_mapping : SizeMapping = SizeMapping(0x20000000L, 0x00010000),
               ram_name : String = "",
+              withBusErrorLogger : Boolean = true,
+              busErrorLogDepth : Int = 32,
+              busErrorLocalDepth : Int = 4,
              ) = {
     val plugins : ArrayBuffer[SpinexPlugin] = mutable.ArrayBuffer(
+      BusErrorPlugin(depth = if (withBusErrorLogger) busErrorLogDepth else 0,
+                     localDepth = if (withBusErrorLogger) busErrorLocalDepth else 0),
       IdentificationPlugin(registerLocation = 0x3000),
       //RandomPlugin(registerLocation = 0x3060),
       TimerPlugin(),

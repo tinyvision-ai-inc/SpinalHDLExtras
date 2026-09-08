@@ -13,6 +13,7 @@ import spinalextras.lib._
 import spinalextras.lib.memory._
 import spinalextras.lib.formal.fillins.PipelinedMemoryBusFormal.PipelinedMemoryBusFormalExt
 import spinalextras.lib.formal.{ComponentWithFormalProperties, FormalProperties, FormalProperty, HasFormalProperties}
+import spinalextras.lib.bus.{BusErrorSentinel}
 import spinalextras.lib.logging.{GlobalLogger, PipelinedMemoryBusLogger, SignalLogger}
 import spinalextras.lib.testing.{FormalTestSuite, GeneralFormalDut} // StateMachine is part of this package
 
@@ -27,7 +28,8 @@ case class Axi4ToPipelinedMemoryBusConfig(
                                            axiConfig: Axi4Config,
                                            readResponseFifoDepth: Int = 4, // Sensible default, can be configured
                                            readResponseFifoLatency: Int = 2,
-                                           readResponseFifoForFMax: Boolean = false
+                                           readResponseFifoForFMax: Boolean = false,
+                                           sentinelResp: Boolean = true
                                          ) {
   val pmbConfig = PipelinedMemoryBusConfig(axiConfig.addressWidth, axiConfig.dataWidth)
 }
@@ -42,7 +44,8 @@ case class Axi4ToPipelinedMemoryBusConfig(
  * - Only INCR bursts (AWBURST/ARBURST = 01) are supported. FIXED and WRAP are not.
  * - Assumes AXI data width and PMB data width are the same.
  * - AXI AxLOCK, AxCACHE, AxPROT, AxQOS, AxREGION are ignored.
- * - Error responses (BRESP/RRESP other than OKAY) are not generated from PMB.
+ * - Writes complete with BRESP OKAY (PMB has no write response). Reads with
+ *   sentinelResp map PMB sentinel data to AXI RRESP (DECERR / SLVERR).
  * - Processes one AXI transaction (burst or single beat) at a time.
  * - Address increment for INCR assumes AxSIZE correctly reflects bytes per transfer.
  */
@@ -124,6 +127,16 @@ class Axi4ToPipelinedMemoryBus(config: Axi4ToPipelinedMemoryBusConfig) extends C
       val r = cloneOf(io.axi.r.payload)
       r.last := rsp_beats_remaining === 1
       r.resp := Axi4.resp.OKAY
+      if (config.sentinelResp) {
+        when(BusErrorSentinel.isLane(rsp, BusErrorSentinel.DECERR)) {
+          r.resp := Axi4.resp.DECERR
+        } elsewhen(BusErrorSentinel.isLane(rsp, BusErrorSentinel.UNIMPL) ||
+            BusErrorSentinel.isLane(rsp, BusErrorSentinel.SLVERR) ||
+            BusErrorSentinel.isLane(rsp, BusErrorSentinel.TIMEOUT_CMD) ||
+            BusErrorSentinel.isLane(rsp, BusErrorSentinel.TIMEOUT_RSP)) {
+          r.resp := Axi4.resp.SLVERR
+        }
+      }
       r.data := rsp
       r.id := ar_reg.id
       r

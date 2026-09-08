@@ -21,6 +21,9 @@ library source lives under `hw/spinal/spinalextras/lib`.
 - **`LMMI`** — Lattice Memory Master Interface support, including a peripheral mapper.
 - **`WishboneStage`**, **`DirectBus`**, **`AXIBusLogger`** — pipeline staging, direct point-to-point
   buses, and AXI bus traffic logging.
+- **Bus error logger** — `BusError` / `BusErrorPlugin`: miss, timeout, and BusIf holes complete with
+  sentinels and optionally log into a second FlowLogger at `0xe0008000`. See
+  [docs/bus-error-logger.md](docs/bus-error-logger.md).
 
 ## On-Chip Network / NoC (`lib/noc`)
 
@@ -131,7 +134,7 @@ A configurable RISC-V SoC (VexRiscv core) with a plugin-based peripheral archite
   case class, and IP-packaging entry point.
 - **`lib/soc/spinex/plugins`** — VexRiscv-style plugins that attach peripherals to the CPU/bus:
   `PeripheralBus`, `TimerPlugin`, `I2CPlugin`/`OpenCoresI2CPlugin`, `Uart16550CtrlPlugin`,
-  `JTagPlugin`, `EventLoggerPlugin`, `IdentificationPlugin`.
+  `JTagPlugin`, `EventLoggerPlugin`, `BusErrorPlugin`, `IdentificationPlugin`.
 - **`lib/soc/bus/WishbonePlugin`** — Wishbone bus attachment for the SoC.
 - **`CSREventManager`** — a control/status-register-driven event manager.
 - **`DeviceTree`** — builds a device tree overlay (`{design}.overlay`) describing the assembled SoC.

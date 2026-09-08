@@ -39,6 +39,11 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
   }
   noIoPrefix()
 
+  /** Driven from TinyClunx / WB interconnect; idle on SpinexMinimal. */
+  var axiUsbBusErrorIn: Flow[spinalextras.lib.bus.BusErrorEvent] = null
+  var axiMmiBusErrorIn: Flow[spinalextras.lib.bus.BusErrorEvent] = null
+  var wbBusErrorIn: Flow[spinalextras.lib.bus.BusErrorEvent] = null
+
   val mainClockDomain = ClockDomain.current
 
   val resetCtrlClockDomain = ClockDomain(
@@ -245,6 +250,12 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
       master = apbBridge.io.apb,
       slaves = apbMapping
     )
+    val apbIn = apbBridge.io.apb
+    val apbMiss = Flow(spinalextras.lib.bus.BusErrorEvent())
+    apbMiss.setName("apb_decode_miss")
+    apbMiss.valid := apbIn.PSEL.lsb && apbIn.PENABLE && apbDecoder.io.output.PSEL === 0
+    apbMiss.payload.assign(apbIn.PADDR.resize(32 bits), apbIn.PWRITE, spinalextras.lib.bus.BusErrorMaster.DBus, spinalextras.lib.bus.BusErrorCause.DECERR)
+    spinalextras.lib.bus.BusError.reportFlow(apbMiss)
 
     val stagedBridge = PipelinedMemoryBus(32, 32).setName("interconnect")
     interconnect.addMaster(PipelinedMemoryBusMultiBus(stagedBridge.cmdM2sPipe().cmdS2mPipe().rspPipe().setName("interconnect_staged")), "dBus")

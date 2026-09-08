@@ -37,6 +37,7 @@ class FlowLogger(val datas: Seq[(Data, ClockDomain)], val cfg : FlowLoggerConfig
 
     val dropped_events = out(UInt(32 bits))
     val flush_dropped = in(Bool()) default(False)
+    val flush = in(Bool()) default(False)
 
     val captured_events = out(UInt(32 bits))
     val sysclk = out(UInt(64 bits))
@@ -70,15 +71,14 @@ class FlowLogger(val datas: Seq[(Data, ClockDomain)], val cfg : FlowLoggerConfig
   io.sysclk := syscnt
 
   io.captured_events.setAsReg() init (0)
-  when(io.log.fire) {
-      io.captured_events := io.captured_events + 1
+  when(io.flush) {
+    io.captured_events := 0
+  } elsewhen (io.log.fire) {
+    io.captured_events := io.captured_events + 1
   }
 
   val dropped_events = Reg(UInt(32 bits)) init (0)
   io.dropped_events := dropped_events
-  when(io.flush_dropped) {
-    dropped_events := 0
-  }
 
   val time_since_syscnt = Timeout(gtimeTimeout)
 
@@ -93,9 +93,6 @@ class FlowLogger(val datas: Seq[(Data, ClockDomain)], val cfg : FlowLoggerConfig
   syscnt_stream.addFormalPayloadInvarianceException()
 
   val eventDropped = CombInit(False)
-  when(eventDropped) {
-    dropped_events := dropped_events + 1
-  }
 
   metadata_stream.payload := (dropped_events ## U(signature, 32 bits) ## U(datas.size, 10 bits) ## B(1, meta_id_width bits) ## ~B(0, index_size bits)).resize(logBits)
   metadata_stream.valid := RegInit(False) setWhen(time_since_syscnt || eventDropped) clearWhen(metadata_stream.fire)
@@ -124,6 +121,11 @@ class FlowLogger(val datas: Seq[(Data, ClockDomain)], val cfg : FlowLoggerConfig
       data_log_capture.io.stamped_stream
     }
 
+  when(io.flush_dropped || io.flush) {
+    dropped_events := 0
+  } elsewhen (eventDropped) {
+    dropped_events := dropped_events + 1
+  }
 
   when(syscnt_stream.fire) {
     needs_syscnt := False
@@ -155,12 +157,16 @@ class FlowLogger(val datas: Seq[(Data, ClockDomain)], val cfg : FlowLoggerConfig
   }
 
   def create_logger_port(sysBus: BusSlaveProvider, address: BigInt, depth: Int,
-                         ctrlStreams : Option[(Stream[Bits], Flow[Bits])] = None) = new Composite(this, "logger_port") {
+                         ctrlStreams : Option[(Stream[Bits], Flow[Bits])] = None,
+                         irq: Bool = null) = new Composite(this, "logger_port") {
     //val loggerFifo = StreamFifo(cloneOf(io.log.payload), depth)
 
     val loggerFifo = new MemoryBackedFifo(cloneOf(io.log.payload), depth, memory_label = "logger_buffer")
     loggerFifo.setName(s"loggerFifo_${depth}")
     loggerFifo.io.push <> io.log.stage()
+    if (irq != null) {
+      irq := loggerFifo.io.occupancy =/= 0
+    }
 
     val stream = loggerFifo.io.pop.s2mPipe().m2sPipe()
 
@@ -178,6 +184,7 @@ class FlowLogger(val datas: Seq[(Data, ClockDomain)], val cfg : FlowLoggerConfig
       stream.map(_.resize(ctrlStreams.get._1.payload.getWidth bits)) >> ctrlStreams.get._1
       loggerFifo.io.flush := False
       io.flush_dropped := False
+      io.flush := False
 
       io.manual_trigger.clearAll()
     } else {
@@ -206,7 +213,9 @@ class FlowLogger(val datas: Seq[(Data, ClockDomain)], val cfg : FlowLoggerConfig
       logger_port.createReadOnly(Bits(32 bits), address + 24) := io.sysclk.resize(32).asBits
       logger_port.createReadOnly(UInt(32 bits), address + 28) := RegNext(loggerFifo.io.occupancy, init = U(0)).resized
 
-      loggerFifo.io.flush := RegNext(logger_port.isWriting(address + 28))
+      val doFlush = RegNext(logger_port.isWriting(address + 28)) init (False)
+      loggerFifo.io.flush := doFlush
+      io.flush := doFlush
 
       val manual_trigger = io.manual_trigger.clone()
       logger_port.driveFlow(manual_trigger, address + 32)
@@ -222,10 +231,25 @@ class FlowLogger(val datas: Seq[(Data, ClockDomain)], val cfg : FlowLoggerConfig
       io.flowFires.zipWithIndex.foreach(x => {
         val flowCnt = RegInit(U(0, 32 bits))
         logger_port.createReadOnly(UInt(32 bits), address + 56 + x._2 * 4) := flowCnt
-        when(x._1) {
+        when(doFlush) {
+          flowCnt := 0
+        } elsewhen (x._1) {
           flowCnt := flowCnt + 1
         }
       })
+    }
+
+    /* BusErrorPlugin already emits bus_error@ with named CSRs. Do not also
+     * emit eventLogger@ on the same window (wrong compatible and size 0x4). */
+    if (!Option(getName()).exists(_.toLowerCase.contains("buserror"))) {
+    new DeviceTreeProvider(address) {
+      override def compatible : Seq[String] = Seq(s"spinex,event-logger")
+      override def baseEntryPath = Seq("/", f"eventLogger@${address.toString(16)}")
+
+      override def appendDeviceTree(dt: DeviceTree): Unit = {
+        super.appendDeviceTree(dt)
+      }
+    }
     }
 
     if(ctrlStreams.isDefined) {
@@ -247,15 +271,6 @@ class FlowLogger(val datas: Seq[(Data, ClockDomain)], val cfg : FlowLoggerConfig
             io.flush_dropped := True
           }
         }
-      }
-    }
-
-    new DeviceTreeProvider(address) {
-      override def compatible : Seq[String] = Seq(s"spinex,event-logger")
-      override def baseEntryPath = Seq("/", f"eventLogger@${address.toString(16)}")
-
-      override def appendDeviceTree(dt: DeviceTree): Unit = {
-        super.appendDeviceTree(dt)
       }
     }
   }
@@ -300,6 +315,21 @@ class FlowLoggerTestBench(inactiveChannels : Boolean = false) extends ComponentW
 
 
 object FlowLogger {
+  /** LiteX-style DT windows. Same offsets as FlowLoggerCCode / EventLogger C. */
+  def csrDtRegs(windowBytes: Int = 0x400): Seq[(String, SizeMapping)] = Seq(
+    "ctrl" -> SizeMapping(0x00, 4),
+    "captured_events" -> SizeMapping(0x04, 4),
+    "stream" -> SizeMapping(0x08, 12),
+    "checksum" -> SizeMapping(0x14, 4),
+    "sysclk_lsb" -> SizeMapping(0x18, 4),
+    "fifo_occupancy" -> SizeMapping(0x1c, 4),
+    "channel_count" -> SizeMapping(0x20, 4),
+    "inactive_mask" -> SizeMapping(0x24, 4),
+    "signature" -> SizeMapping(0x30, 4),
+    "dropped_events" -> SizeMapping(0x34, 4),
+    "event_counters" -> SizeMapping(0x38, windowBytes - 0x38)
+  )
+
   def apply(config : FlowLoggerConfig, signals: Seq[(Data, Flow[Bits], ClockDomain)]*): FlowLogger = {
     new FlowLogger(signals.flatten.map(x => (x._1, x._3)), config).assign(signals.flatten.map(_._2))
   }

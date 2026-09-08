@@ -327,19 +327,32 @@ object Constraints {
   /** Same net as top `jtag_tck`. write_file already create_clocks the pad. */
   object JtagPadClock extends SpinalTag
 
+  private def withCdcPrefix(n: String): String =
+    if (n.contains("cdc_")) n else s"cdc_$n"
+
   private def stableCdcName(c: Component): String = {
     val raw = Option(c.getName()).getOrElse(c.getClass.getSimpleName)
     val cleaned = raw.replaceAll("[^A-Za-z0-9_]+", "_").stripPrefix("_")
-    if (cleaned.contains("cdc_")) cleaned
-    else c match {
+    c match {
       // setName (not setPartialName): bufferCC_78 must become cdc_BufferCC_78
       // so *cdc_BufferCC* matches. setPartialName leaves the Spinal default.
       case _: BufferCC[_] =>
-        val suf = cleaned.replaceAll("(?i)^buffercc_?", "")
-        if (suf.isEmpty) "cdc_BufferCC" else s"cdc_BufferCC_$suf"
+        if (cleaned.contains("cdc_")) cleaned
+        else {
+          val suf = cleaned.replaceAll("(?i)^buffercc_?", "")
+          if (suf.isEmpty) "cdc_BufferCC" else s"cdc_BufferCC_$suf"
+        }
+      // Validator / SDC glob is *cdc_*ccToggle*. Unnamed StreamCCByToggle
+      // would otherwise become cdc_StreamCCByToggle (no ccToggle substring).
+      case _: StreamCCByToggle[_] =>
+        val base = withCdcPrefix(if (cleaned.nonEmpty) cleaned else "StreamCC")
+        if (base.toLowerCase.contains("cctoggle")) base else s"${base}_ccToggle"
       case _ =>
-        val base = if (cleaned.nonEmpty) cleaned else c.getClass.getSimpleName
-        s"cdc_$base"
+        if (cleaned.contains("cdc_")) cleaned
+        else {
+          val base = if (cleaned.nonEmpty) cleaned else c.getClass.getSimpleName
+          s"cdc_$base"
+        }
     }
   }
 
