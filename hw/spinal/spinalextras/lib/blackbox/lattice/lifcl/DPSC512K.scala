@@ -72,8 +72,9 @@ class DPSC512K_Mem(target_latency : Int = 2, read_write_ports : Int = 2, initial
   override val requirements = MemoryRequirement(
     Bits(32 bits), (1 << 14), read_write_ports, 0, 0
   )
-  override lazy val latency : Int = target_latency
-  assert(latency == 2 || latency == 1)
+  /* Cmd flop in front of CSA/CSB (HIP). OUTREG still tracks target_latency. */
+  override lazy val latency : Int = target_latency + 1
+  assert(target_latency == 2 || target_latency == 1)
   assert(read_write_ports == 2 || read_write_ports == 1)
 
   override def init(initialContents : Seq[BigInt]): Unit = {
@@ -90,18 +91,21 @@ class DPSC512K_Mem(target_latency : Int = 2, read_write_ports : Int = 2, initial
   val mem_port_b = (mem.io.DIB, mem.io.ADB, mem.io.WEB, mem.io.CSB, mem.io.BENB_N, mem.io.DOB)
   for(port_maps <- io.readWritePorts.zip(Seq(mem_port_a, mem_port_b))) {
     val (port, (di, adr, we, cs, benb, dout)) = port_maps
-    di := port.cmd.data
-    adr := port.cmd.address.asBits
-    we := port.cmd.write
-    cs := port.cmd.valid
-    benb := ~port.cmd.mask
+    val cmdV = RegNext(port.cmd.valid) init False
+    val cmdW = RegNext(port.cmd.write) init False
+    di := RegNext(port.cmd.data)
+    adr := RegNext(port.cmd.address).asBits
+    we := cmdW
+    cs := cmdV
+    benb := RegNext(~port.cmd.mask)
+    val readHit = cmdV && !cmdW
 
     port.rsp.data := dout
 
-    if(latency == 2) {
-      port.rsp.valid := RegNext(RegNext(port.readFire, False), False)
+    if(target_latency == 2) {
+      port.rsp.valid := RegNext(RegNext(readHit, False), False)
     } else {
-      port.rsp.valid := RegNext(port.readFire, False)
+      port.rsp.valid := RegNext(readHit, False)
     }
   }
 }
