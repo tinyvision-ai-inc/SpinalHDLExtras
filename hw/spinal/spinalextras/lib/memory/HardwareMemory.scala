@@ -98,6 +98,7 @@ abstract class HardwareMemory[T <: Data]() extends ComponentWithFormalProperties
 
       pmb.rsp.valid := read.rsp.valid
       pmb.rsp.data := read.rsp.data
+      pmb.rsp.error := False
 
       write.cmd.valid := pmb.cmd.valid && pmb.cmd.write
       write.cmd.address := pmb.cmd.payload.wordAddress
@@ -113,6 +114,7 @@ abstract class HardwareMemory[T <: Data]() extends ComponentWithFormalProperties
 
         pmb.rsp.valid := read_write.rsp.valid
         pmb.rsp.data := read_write.rsp.data
+        pmb.rsp.error := False
 
         read_write.cmd.write := pmb.cmd.write
         read_write.cmd.valid := pmb.cmd.valid

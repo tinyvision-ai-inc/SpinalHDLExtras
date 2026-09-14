@@ -104,7 +104,7 @@ object BusErrorSim {
   }
 
   /** Vex DBusSimplePlugin samples rsp the cycle after cmd.ready, not the fire cycle. */
-  def pmbReadAfterCmd(bus: PipelinedMemoryBus, cd: ClockDomain, addr: Long): Long = {
+  def pmbReadAfterCmd(bus: PipelinedMemoryBus, cd: ClockDomain, addr: Long): (Long, Boolean) = {
     bus.cmd.valid #= true
     bus.cmd.write #= false
     bus.cmd.address #= addr
@@ -113,7 +113,13 @@ object BusErrorSim {
     cd.waitSamplingWhere(bus.cmd.ready.toBoolean)
     bus.cmd.valid #= false
     cd.waitSamplingWhere(bus.rsp.valid.toBoolean)
-    bus.rsp.data.toLong & 0xFFFFFFFFL
+    (bus.rsp.data.toLong & 0xFFFFFFFFL, bus.rsp.error.toBoolean)
+  }
+
+  def pmbWriteAfterCmd(bus: PipelinedMemoryBus, cd: ClockDomain, addr: Long, data: Long): Boolean = {
+    pmbCmd(bus, cd, addr, write = true, data)
+    cd.waitSamplingWhere(bus.rsp.valid.toBoolean)
+    bus.rsp.error.toBoolean
   }
 
   def attachLog(dut: Component, log: Stream[Bits], nSources: Int, seen: mutable.ArrayBuffer[Rec]): Unit = {
@@ -194,6 +200,7 @@ class PmbTimeoutRspDut extends Component {
     io.bus.cmd.ready := True
     io.bus.rsp.valid := False
     io.bus.rsp.data.assignDontCare()
+    io.bus.rsp.error := False
   }
   val tmo = new PipelinedMemoryBusTimeout(cfg, 200 ns)
   tmo.io.pmb_m <> hang.io.bus
@@ -440,21 +447,27 @@ class BusErrorLogTest extends AnyFunSuite {
       dut.clockDomain.waitSampling(4)
       val seen = mutable.ArrayBuffer[BusErrorSim.Rec]()
       BusErrorSim.attachLog(dut, dut.io.log, 1, seen)
-      val data = BusErrorSim.pmbRead(dut.io.bus, dut.clockDomain, 0x12345678L)
+      val (data, err) = BusErrorSim.pmbReadAfterCmd(dut.io.bus, dut.clockDomain, 0x12345678L)
       assert(data == 0xDEADBEEFL, f"sentinel 0x$data%08x")
+      assert(err, "DECERR must set rsp.error")
       dut.clockDomain.waitSampling(16)
       assert(seen.exists(r => r.cause == 1 && r.addr == 0x12345678L && r.data == 0xDEADBEEFL), seen)
     }
   }
 
-  test("PMB decode miss write completes without hang") {
+  test("PMB decode miss write completes with rsp.error") {
     Config.sim.doSim(new PmbMissCompleterDut().setDefinitionName("PmbMissWrite")) { dut =>
       SimTimeout(20 us)
       dut.clockDomain.forkStimulus(100 MHz)
       dut.io.bus.cmd.valid #= false
       dut.io.log.ready #= true
       dut.clockDomain.waitSampling(4)
-      BusErrorSim.pmbCmd(dut.io.bus, dut.clockDomain, 0xAABB0000L, write = true, data = 0x11)
+      val seen = mutable.ArrayBuffer[BusErrorSim.Rec]()
+      BusErrorSim.attachLog(dut, dut.io.log, 1, seen)
+      val err = BusErrorSim.pmbWriteAfterCmd(dut.io.bus, dut.clockDomain, 0xAABB0000L, 0x11)
+      assert(err, "DECERR write must set rsp.error")
+      dut.clockDomain.waitSampling(16)
+      assert(seen.exists(r => r.cause == 1 && r.write && r.addr == 0xAABB0000L), seen)
     }
   }
 
@@ -480,10 +493,27 @@ class BusErrorLogTest extends AnyFunSuite {
       dut.clockDomain.waitSampling(4)
       val seen = mutable.ArrayBuffer[BusErrorSim.Rec]()
       BusErrorSim.attachLog(dut, dut.io.log, 1, seen)
-      val data = BusErrorSim.pmbReadAfterCmd(dut.io.bus, dut.clockDomain, 0xE0008600L)
+      val (data, err) = BusErrorSim.pmbReadAfterCmd(dut.io.bus, dut.clockDomain, 0xE0008600L)
       assert(data == 0xCAFED00DL, f"got 0x$data%08x")
+      assert(err, "TIMEOUT_CMD must set rsp.error")
       dut.clockDomain.waitSampling(16)
       assert(seen.exists(_.cause == 4), seen)
+    }
+  }
+
+  test("timeout on hung write cmd returns TIMEOUT_CMD with rsp.error") {
+    Config.sim.doSim(new PmbTimeoutCmdDut().setDefinitionName("PmbTimeoutCmdWrite")) { dut =>
+      SimTimeout(50 us)
+      dut.clockDomain.forkStimulus(100 MHz)
+      dut.io.bus.cmd.valid #= false
+      dut.io.log.ready #= true
+      dut.clockDomain.waitSampling(4)
+      val seen = mutable.ArrayBuffer[BusErrorSim.Rec]()
+      BusErrorSim.attachLog(dut, dut.io.log, 1, seen)
+      val err = BusErrorSim.pmbWriteAfterCmd(dut.io.bus, dut.clockDomain, 0xE0008600L, 0x55)
+      assert(err, "TIMEOUT_CMD write must set rsp.error")
+      dut.clockDomain.waitSampling(16)
+      assert(seen.exists(r => r.cause == 4 && r.write), seen)
     }
   }
 
@@ -496,8 +526,9 @@ class BusErrorLogTest extends AnyFunSuite {
       dut.clockDomain.waitSampling(4)
       val seen = mutable.ArrayBuffer[BusErrorSim.Rec]()
       BusErrorSim.attachLog(dut, dut.io.log, 1, seen)
-      val data = BusErrorSim.pmbReadAfterCmd(dut.io.bus, dut.clockDomain, 0xE0008604L)
+      val (data, err) = BusErrorSim.pmbReadAfterCmd(dut.io.bus, dut.clockDomain, 0xE0008604L)
       assert(data == 0xDEADBEEFL, f"got 0x$data%08x")
+      assert(err, "TIMEOUT_RSP must set rsp.error")
       dut.clockDomain.waitSampling(16)
       assert(seen.exists(r => r.cause == 4 && r.data == 0xDEADBEEFL), seen)
     }
@@ -512,10 +543,27 @@ class BusErrorLogTest extends AnyFunSuite {
       dut.clockDomain.waitSampling(4)
       val seen = mutable.ArrayBuffer[BusErrorSim.Rec]()
       BusErrorSim.attachLog(dut, dut.io.log, 1, seen)
-      val data = BusErrorSim.pmbRead(dut.io.bus, dut.clockDomain, 0x40)
+      val (data, err) = BusErrorSim.pmbReadAfterCmd(dut.io.bus, dut.clockDomain, 0x40)
       assert(data == 0xA5A5A5A5L, f"got 0x$data%08x")
+      assert(err, "UNIMPL read must set rsp.error")
       dut.clockDomain.waitSampling(16)
       assert(seen.exists(r => r.cause == 3 && r.data == 0xA5A5A5A5L), seen)
+    }
+  }
+
+  test("BusIf hole write emits rsp.error") {
+    Config.sim.doSim(new PmbUnimplDut().setDefinitionName("PmbUnimplWrite")) { dut =>
+      SimTimeout(50 us)
+      dut.clockDomain.forkStimulus(100 MHz)
+      dut.io.bus.cmd.valid #= false
+      dut.io.log.ready #= true
+      dut.clockDomain.waitSampling(4)
+      val seen = mutable.ArrayBuffer[BusErrorSim.Rec]()
+      BusErrorSim.attachLog(dut, dut.io.log, 1, seen)
+      val err = BusErrorSim.pmbWriteAfterCmd(dut.io.bus, dut.clockDomain, 0x40, 0x22)
+      assert(err, "UNIMPL write must set rsp.error")
+      dut.clockDomain.waitSampling(16)
+      assert(seen.exists(r => r.cause == 3 && r.write), seen)
     }
   }
 

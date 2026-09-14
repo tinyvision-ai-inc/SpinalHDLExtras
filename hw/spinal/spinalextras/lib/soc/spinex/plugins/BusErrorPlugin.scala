@@ -22,10 +22,10 @@ case class BusErrorPlugin(address: BigInt = BusError.Address,
   override def regs: Seq[(String, SizeMapping)] = FlowLogger.csrDtRegs(BusError.Window.toInt)
 
   override def appendDeviceTree(dt: DeviceTree): Unit = {
-    super.appendDeviceTree(dt)
     if (depth <= 0) {
       return
     }
+    super.appendDeviceTree(dt)
     val names = BusErrorLogger.get().signals.flatMap { s =>
       Option(s._2.getName()).filter(_.nonEmpty)
     }

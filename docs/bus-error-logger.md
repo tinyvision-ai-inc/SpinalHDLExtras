@@ -12,14 +12,18 @@ The debug trace RAM (EventLogger at `0xe0006000`) is already in use. Putting
 interconnect faults into that same FIFO would drop traces when the bus is
 misbehaving — which is when you need both.
 
-This Spinal PMB has no `rsp.error`. Completing a bad access as a RISC-V load/store
-access fault (`mcause` 7) would mean changing Spinal or Vex. That is out of scope.
+This Spinal PMB `rsp.error` is forwarded from Wishbone ERR and from miss /
+timeout completers. A load that faults is a RISC-V access fault (`mcause` 5)
+when Vex `catchAccessFault` / cached `catchAccessError` is on. Stores on
+`DBusSimplePlugin` still retire without `mcause` 7: that plugin only samples
+`dBus.rsp.error` on loads.
 
 ## Solution
 
 **Always finish the cycle.** A miss, timeout, or unimplemented offset returns a
-fixed sentinel (never `0`) so software can tell failure modes apart. Stores
-complete; they do not trap.
+fixed sentinel (never `0`) so software can tell failure modes apart. Loads also
+set `rsp.error` so the CPU can take an access fault. Stores complete on the
+bus; `DBusSimplePlugin` does not trap them.
 
 **Optionally record the event.** A second FlowLogger — same block and CSR layout
 as EventLogger, separate RAM — sits at `0xe0008000` (`BusErrorLogger`). Interrupt
@@ -68,11 +72,11 @@ and the firmware msgq; this skid is for sparse / colliding pulses, not a
 continuous 75 MHz firehose.
 
 Unimplemented offsets on one bus share one channel: each hole calls
-`BusError.unimplTap`; the plugin merges them (`queue(1)` then lower-first) to
-`dbus_unimpl` (or `ibus_unimpl` when those buses exist). **Only holes elaborated
-inside SpineX are merged.** TinyClunx / Wishbone BusIf holes still complete
-locally with `0xA5A5A5A5`; they are not wired into the SpineX FIFO (sibling
-hierarchy).
+`BusError.unimplTap`; the plugin merges taps that live under the logger
+component (`queue(1)` then lower-first) to `dbus_unimpl` (or `ibus_unimpl`).
+TinyClunx USB Wishbone BusIf holes are siblings of SpineX, so they still
+complete locally with `0xA5A5A5A5` and do not enter the SpineX FIFO. Standalone
+sims that call `BusErrorLogger.build` on the same DUT do merge.
 
 Typical SpinexMinimal / debug SoC channels:
 
@@ -128,7 +132,9 @@ masked. `bus_error mask` / `unmask` write `inactive_mask` (same CSR as EventLogg
 all. Completers still finish the bus. Spinal overlay emits `channel-names` from
 the logger taps. The SoC dtsi must match until the overlay is the firmware DT.
 
-Camera (`dual_imx219`) is always **6** taps:
+Camera (`dual_imx219`) is **6** ingest/miss taps plus `wb_slverr` from
+`PipelinedMemoryBusToWishbone` when `BusError.loggingEnabled` (slave ERR on the
+CPU WB master, cause SLVERR):
 
 | Index | Channel | Source |
 |---|---|---|
@@ -138,6 +144,7 @@ Camera (`dual_imx219`) is always **6** taps:
 | 3 | `axi_mmi_bus_error` | MMI AXI ingest |
 | 4 | `wb_decode_miss` | Wishbone ingest |
 | 5 | `apb_decode_miss` | APB decoder miss in SpineX |
+| 6 | `wb_slverr` | PMB→WB adapter: slave ERR (USB CSR timeout, etc.) |
 
 SpinexMinimal uses a different N (test slaves / `dbus_unimpl`; no USB/MMI/WB ingest).
 
@@ -187,13 +194,12 @@ address for that path yet. TinyClunx / WB BusIf holes may complete with
 | PMB / WB BusIf reserved offset | always | `0xA5A5A5A5` | `dbus_unimpl` if the BusIf is in SpineX |
 | AXI no slave (`AxiMissCompleter`) | burst, tiled lanes | `0xDEADBEEF` per 32-bit lane | `axi_usb_bus_error` / `axi_mmi_bus_error` |
 | AXI→PMB (`sentinelResp`, default on) | RRESP from PMB data | same sentinels | same AXI taps if RESP ≠ OKAY |
-| WB interconnect miss | ACK + ERR | `0xDEADBEEF` | `wb_decode_miss` (ingest) |
+| WB interconnect miss | ACK + ERR | `0xDEADBEEF` | `wb_decode_miss` (ingest); PMB `rsp.error` |
+| Mapped slave ERR (e.g. USB CSR timeout) | ACK + ERR | slave data (`0xDEADBEEF` on LMMI timeout) | `wb_slverr` SLVERR at `PipelinedMemoryBusToWishbone` |
 
 Mapped, implemented RAM/CSR beats stay OKAY / ACK. A hole in a mapped window is
 UNIMPL, not DECERR. Unmapped AXI in the 24-bit fabric is DECERR (no slave), not
 UNIMPL.
-
-Do not set Vex `dBus.rsp.error` (no `mcause` 7).
 
 ## Camera SoC (`dual_imx219`)
 

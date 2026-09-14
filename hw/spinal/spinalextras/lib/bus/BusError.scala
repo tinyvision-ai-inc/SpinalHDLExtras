@@ -16,6 +16,10 @@ import scala.collection.mutable.ArrayBuffer
  * UNIMPL from every BusIf on a bus merges to one channel (`dbus_unimpl`).
  * The plugin only calls [[BusErrorLogger.create_logger_port]] after elaboration.
  *
+ * Peripheral UNIMPL, SLVERR, and TIMEOUT also complete the CPU cycle with
+ * `rsp.error` / WB `ERR` (load access fault `mcause` 5, store `mcause` 7).
+ * On-chip RAM does not: those accesses stay posted and never set `error`.
+ *
  * CSR map is the EventLogger map (ctrl, captured, `readStreamNonBlocking`,
  * occupancy, dropped, per-channel counts). FlowLogger stamps time; the event
  * payload does not.
@@ -99,26 +103,30 @@ object BusError {
     BusErrorLogger.get().signals += ((pair._1, pair._2, ClockDomain.current, Set("bus-error")))
   }
 
-  private case class UnimplSrc(flow: Flow[Bits], bus: Int)
+  private case class UnimplSrc(flow: Flow[Bits], bus: Int, origin: Component)
   private val unimplSrcs = ArrayBuffer[UnimplSrc]()
 
-  /** BusIf hole on this interconnect; merged to one FlowLogger channel per bus.
-    * Skip taps outside SpineX — TinyClunx/WB holes still complete locally. */
+  private def under(host: Component, c: Component): Boolean = {
+    var x = c
+    while (x != null) {
+      if (x eq host) {
+        return true
+      }
+      x = x.parent
+    }
+    false
+  }
+
+  /** BusIf hole on this interconnect; merged to one FlowLogger channel per bus
+    * when [[BusErrorLogger.build]] runs in a parent of this Flow. TinyClunx USB
+    * Wishbone holes are siblings of SpineX, so they complete locally and do not
+    * enter the SpineX FIFO. Tests and SpineX BusIf holes do. */
   def unimplTap(flow: Flow[BusErrorEvent], bus: Int = BusErrorMaster.DBus): Unit = {
     if (!loggingEnabled) return
-    var c = Component.current
-    var underLogger = false
-    while (c != null) {
-      if (c.getClass.getName.contains("Spinex") || (c.getName() != null && c.getName().contains("spinex"))) {
-        underLogger = true
-      }
-      c = c.parent
-    }
-    if (!underLogger) return
     val n = flow.getName()
     assert(n != null && n.nonEmpty, "BusError.unimplTap requires Flow.setName")
     val bits = flow.map(_.asBits).setName(n)
-    unimplSrcs += UnimplSrc(bits, bus)
+    unimplSrcs += UnimplSrc(bits, bus, Component.current)
   }
 
   def channelName(bus: Int): String = bus match {
@@ -129,8 +137,11 @@ object BusError {
   }
 
   def bindUnimplMerges(): Unit = {
-    if (unimplSrcs.isEmpty) return
-    unimplSrcs.groupBy(_.bus).foreach { case (bus, srcs) =>
+    val host = Component.current
+    val local = unimplSrcs.filter(s => under(host, s.origin))
+    unimplSrcs.clear()
+    if (local.isEmpty) return
+    local.groupBy(_.bus).foreach { case (bus, srcs) =>
       val chName = channelName(bus)
       val streams = srcs.zipWithIndex.map { case (s, i) =>
         val drop = Bool()

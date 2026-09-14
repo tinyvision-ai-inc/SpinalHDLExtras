@@ -53,6 +53,7 @@ class PmbHangSlave(config: PipelinedMemoryBusConfig) extends Component {
   io.bus.cmd.ready := False
   io.bus.rsp.valid := False
   io.bus.rsp.data.assignDontCare()
+  io.bus.rsp.error := False
 }
 
 class PmbErrorSlave(config: PipelinedMemoryBusConfig, cause: Int, sentinel: BigInt, eventName: String) extends Component {
@@ -60,6 +61,7 @@ class PmbErrorSlave(config: PipelinedMemoryBusConfig, cause: Int, sentinel: BigI
     val bus = slave(PipelinedMemoryBus(config))
   }
   val waitRsp = RegInit(False)
+  val wrErr = RegNext(io.bus.cmd.fire && io.bus.cmd.write) init False
   val dat = B(sentinel, 32 bits)
   io.bus.cmd.ready := !waitRsp || io.bus.cmd.write
   when(io.bus.cmd.fire && !io.bus.cmd.write) {
@@ -67,8 +69,9 @@ class PmbErrorSlave(config: PipelinedMemoryBusConfig, cause: Int, sentinel: BigI
   } elsewhen (waitRsp) {
     waitRsp := False
   }
-  io.bus.rsp.valid := waitRsp
+  io.bus.rsp.valid := waitRsp || wrErr
   io.bus.rsp.data := dat
+  io.bus.rsp.error := waitRsp || wrErr
 
   val ev = Flow(BusErrorEvent())
   ev.setName(eventName)

@@ -38,7 +38,7 @@ case class PipelinedMemoryBusTimeout(config : PipelinedMemoryBusConfig, timeout 
   val rspHold = RegInit(False)
   val rspHoldData = Reg(Bits(config.dataWidth bits)) init 0
   val rspHoldIsCmd = RegInit(False)
-  when(io.pmb_s.cmd.fire && forceCmd && !io.pmb_s.cmd.write) {
+  when(io.pmb_s.cmd.fire && forceCmd) {
     rspHold := True
     rspHoldData := BusErrorSentinel.TIMEOUT_CMD.resized
     rspHoldIsCmd := True
@@ -52,6 +52,7 @@ case class PipelinedMemoryBusTimeout(config : PipelinedMemoryBusConfig, timeout 
 
   io.pmb_s.rsp.valid := rspHold || io.pmb_m.rsp.valid
   io.pmb_s.rsp.data := Mux(rspHold, rspHoldData, io.pmb_m.rsp.data)
+  io.pmb_s.rsp.error := rspHold || io.pmb_m.rsp.error
 
   val timeoutEvent = Flow(BusErrorEvent())
   timeoutEvent.setName("dbus_timeout")

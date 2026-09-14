@@ -45,7 +45,13 @@ case class PipelinedMemoryBusInterface(bus: PipelinedMemoryBus, sizeMap: SizeMap
 
   bus.cmd.ready := !halted && bus.cmd.valid
   bus.rsp.payload.data := bus_rdata
-  bus.rsp.valid := RegNext(doRead) init(False)
+  /* Hole writes pulse `reg_wrerr` the cycle after `doWrite`; sample it then.
+   * Implemented writes stay posted (no rsp). RAM is not this BusIf. */
+  val rdRsp = RegNext(doRead) init(False)
+  val rdErr = RegNext(doRead && bus_slverr) init(False)
+  val wrRsp = RegNext(doWrite) init(False)
+  bus.rsp.valid := rdRsp || (wrRsp && reg_wrerr)
+  bus.rsp.payload.error := rdErr || (wrRsp && reg_wrerr)
 
   if (spinalextras.lib.bus.BusError.loggingEnabled) {
     val unimpl = Flow(spinalextras.lib.bus.BusErrorEvent())
