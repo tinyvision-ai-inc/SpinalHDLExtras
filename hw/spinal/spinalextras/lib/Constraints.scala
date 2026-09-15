@@ -46,7 +46,9 @@ class Constraints {
 
   private def clockNameFor(data: Data, toplevel: Component): String = {
     val leaf = portLeaf(data)
-    if (isToplevelPort(data, toplevel) || isPllGeneratedDest(data) || isSoftDphyByteClock(leaf))
+    // Soft-DPHY byte clocks share the leaf clk_byte_hs_o; two CSI pipes need
+    // distinct create_clock names (RtlPath), not two clocks named clk_byte_hs_o.
+    if (isToplevelPort(data, toplevel) || isPllGeneratedDest(data))
       leaf
     else
       data.getRtlPath().replace('/', '_')
