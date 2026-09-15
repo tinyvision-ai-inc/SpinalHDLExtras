@@ -30,7 +30,9 @@ _start:
   sw   zero, 0(t1)
   ori  s0, s0, 8
 
-  li   t1, 0xe0008900
+  /* tohost @ 0x41000000 (direct dBus). a2=0 so a trap is FAIL. */
+  li   a2, 0
+  li   t1, 0x41000000
   li   t2, 0xf
   bne  s0, t2, fail
   li   t2, 1
@@ -49,8 +51,7 @@ trap:
   csrw mepc, t4
   mret
 bad:
-  li   t1, 0xe0008900
-  /* high bit set + actual mcause */
+  li   t1, 0x41000000
   li   t2, 0x80000000
   or   t2, t2, t3
   sw   t2, 0(t1)

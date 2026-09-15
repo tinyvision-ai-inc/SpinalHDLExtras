@@ -3,35 +3,53 @@ package spinalextras.lib.soc.spinex.plugins
 import spinal.core._
 import spinal.lib._
 import spinal.lib.bus.misc.SizeMapping
-import spinal.lib.bus.regif.AccessType.RW
-import spinal.lib.bus.regif.ClassName
 import spinal.lib.bus.simple.{PipelinedMemoryBus, PipelinedMemoryBusConfig}
 import spinalextras.lib.bus._
-import spinalextras.lib.bus.simple.PipelinedMemoryBusInterface
 import spinalextras.lib.misc.PipelinedMemoryBusTimeout
 import spinalextras.lib.soc.spinex.{Spinex, SpinexPlugin}
 
 import scala.language.postfixOps
 
 /** Stimulus windows for the RISC-V bus-error sample. Not production. */
-class BusErrorTestPlugin(hangTimeout: TimeNumber = 1 us,
-                          tohost: UInt = null) extends SpinexPlugin {
+class BusErrorTestPlugin(hangTimeout: TimeNumber = 1 us) extends SpinexPlugin {
+  /** PASS/FAIL @ 0x41000000 on direct dBus (peripheral tohost was a decode miss). */
+  var host: UInt = null
+  var tohostWrCount: UInt = null
+  var unimplFireCount: UInt = null
+
   override def apply(som: Spinex): Unit = {
     val cfg = som.system.pipelinedMemoryBusConfig
 
-    val host = Reg(UInt(32 bits)) init 0
-    if (tohost != null) {
-      tohost := host
+    val tohostBus = PipelinedMemoryBus(cfg).setName("buserr_tohost")
+    som.add_slave(tohostBus, "buserr_tohost", SizeMapping(0x41000000L, 0x10), true, "dBus")
+    host = Reg(UInt(32 bits)) init 0
+    host.setName("buserr_tohost")
+    tohostWrCount = Reg(UInt(8 bits)) init 0
+    tohostWrCount.setName("buserr_tohost_wrcnt")
+    tohostBus.cmd.ready := True
+    when(tohostBus.cmd.fire && tohostBus.cmd.write) {
+      host := tohostBus.cmd.data.asUInt
+      tohostWrCount := tohostWrCount + 1
     }
-    val hostFact = som.interconnect.add_slave_factory("buserr_tohost", SizeMapping(0xe0008900L, 16), false, false, "dBus")
-    hostFact.write(host, 0xe0008900L)
+    val tohostRd = RegNext(tohostBus.cmd.fire && !tohostBus.cmd.write) init False
+    tohostBus.rsp.valid := tohostRd
+    tohostBus.rsp.data := host.asBits
+    tohostBus.rsp.error := False
 
+    /* Hole window: every offset faults (UNIMPL load/store). */
     val unimplBus = PipelinedMemoryBus(cfg).setName("buserr_unimpl")
     som.add_slave(unimplBus, "buserr_unimpl", SizeMapping(0xe0008500L, 0x100), "dBus")
-    implicit val moduleName: ClassName = ClassName("buserr_unimpl")
-    val bif = PipelinedMemoryBusInterface(unimplBus, SizeMapping(0xe0008500L, 0x100))
-    val keep = bif.newRegAt(0xe0008500L, "keep")
-    keep.field(UInt(32 bits), RW)
+    unimplFireCount = Reg(UInt(16 bits)) init 0
+    unimplFireCount.setName("buserr_unimpl_fire")
+    unimplBus.cmd.ready := True
+    when(unimplBus.cmd.fire) {
+      unimplFireCount := unimplFireCount + 1
+    }
+    val rdFault = RegNext(unimplBus.cmd.fire && !unimplBus.cmd.write) init False
+    val wrFault = RegNext(unimplBus.cmd.fire && unimplBus.cmd.write) init False
+    unimplBus.rsp.valid := rdFault || wrFault
+    unimplBus.rsp.data := B(0xA5A5A5A5L, 32 bits)
+    unimplBus.rsp.error := True
 
     val slverr = new PmbErrorSlave(cfg, 2, 0x5A5A5A5AL, "pmb_slverr")
     som.add_slave(slverr.io.bus, "buserr_slverr", SizeMapping(0xe0008700L, 0x100), "dBus")
