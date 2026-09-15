@@ -90,7 +90,8 @@ case class SpinexSpecification(@JsonPropertyDescription("The target CPU clock. T
                                busErrorLogDepth: Int = 32,
                                @JsonPropertyDescription("Per-channel skid for the bus-error FlowLogger (Flow.toStream queue). 0 drops same-cycle/backpressured events. Default 4.")
                                busErrorLocalDepth: Int = 4,
-                               hardwareBreakpointCount: Int = 3,
+                               @JsonPropertyDescription("Sdtrig execute-match slots for OpenOCD hbreak (CsrPlugin.debugTriggers). Power of two; 0 disables. Needed for XIP flash where ebreak cannot be planted.")
+                               hardwareBreakpointCount: Int = 4,
                                externalInterrupts: Int = 8,
                                performanceOptions: SpinexPerformanceOptions = SpinexPerformanceOptions(),
                                peripherals: Seq[SlavePeripheral] = Seq(),
@@ -146,7 +147,8 @@ case class SpinexSpecification(@JsonPropertyDescription("The target CPU clock. T
         twoCycleCache = true
       )),
       withFullBarrel = performanceOptions.withFullBarrel,
-      hwFpu = performanceOptions.hwFpu.map(_())
+      hwFpu = performanceOptions.hwFpu.map(_()),
+      hardwareBreakpointCount = hardwareBreakpointCount
     ).copy(
       onChipRamSize = onChipRamSize,
       pipelineDBus = pipelineDBus,

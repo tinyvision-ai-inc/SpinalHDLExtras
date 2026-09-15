@@ -70,6 +70,13 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
     }
 
     val systemReset  = RegNext(mainClkResetUnbuffered, init = True)
+
+    // Debug Module / DTM clock domain reset: FPGA BOOT known-state + one-shot
+    // Timeout only. Never clear() on board/softwareReset — that was wedging
+    // OpenOCD (DM shared systemReset). Power cycle or bitstream reload re-inits
+    // via BOOT. OpenOCD can still reset DM logic via dmcontrol.dmactive.
+    val debugPorTimeout = Timeout(10 us)
+    val debugReset = RegNext(!debugPorTimeout, init = True)
   }
 
   val systemClockDomain = ClockDomain(
@@ -82,7 +89,16 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
     frequency = mainClockDomain.frequency
   )
 
-  val debugClockDomain = systemClockDomain
+  val debugClockDomain = ClockDomain(
+    clock = mainClockDomain.readClockWire,
+    reset = resetCtrl.debugReset,
+    config = ClockDomainConfig(
+      resetActiveLevel = HIGH,
+      resetKind = SYNC
+    ),
+    frequency = mainClockDomain.frequency
+  )
+  debugClockDomain.setSynchronousWith(systemClockDomain)
 
   var interconnect, directInterconnect: MultiInterconnectByTag = null
 

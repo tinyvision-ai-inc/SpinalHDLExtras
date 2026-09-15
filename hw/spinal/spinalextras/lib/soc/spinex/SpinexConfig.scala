@@ -98,6 +98,8 @@ case class SpinexConfig(onChipRamSize      : BigInt,
                         plugins : Seq[SpinexPlugin] = SpinexConfig.defaultPlugins
                        ){
   require(pipelineApbBridge || pipelineMainBus, "At least pipelineMainBus or pipelineApbBridge should be enable to avoid wipe transactions")
+  require(hardwareBreakpointCount == 0 || (hardwareBreakpointCount & (hardwareBreakpointCount - 1)) == 0,
+    "hardwareBreakpointCount must be 0 or a power of two (Sdtrig tselect)")
 
   def withPlugins(extraPlugins: SpinexPlugin*): SpinexConfig = {
     this.copy(plugins = extraPlugins ++ this.plugins)
@@ -167,7 +169,8 @@ object SpinexConfig{
                 twoCycleRam = true,
                 twoCycleCache = true
               )),
-              dcacheConfig : Option[DataCacheConfig] = None
+              dcacheConfig : Option[DataCacheConfig] = None,
+              hardwareBreakpointCount : Int = 4
              ) =  SpinexConfig(
     onChipRamSize         = 0x00010000,
     onChipRamHexFile      = null,
@@ -175,9 +178,9 @@ object SpinexConfig{
     pipelineMainBus       = false,
     pipelineApbBridge     = true,
     gpioWidth = 32,
-    hardwareBreakpointCount = 3,
+    hardwareBreakpointCount = hardwareBreakpointCount,
     withJtag = withJtag,
-    cpuPlugins = ArrayBuffer( //DebugPlugin added by the toplevel
+    cpuPlugins = ArrayBuffer( // EmbeddedRiscvJtag added by the toplevel when withJtag
       icacheConfig.map(cfg =>
         new IBusCachedPlugin(config = cfg,
           resetVector = resetVector,
@@ -206,7 +209,8 @@ object SpinexConfig{
         bigEndian = bigEndian
       )),
       new CsrPlugin(CsrPluginConfig.small(mtvecInit = null).copy(mtvecAccess = WRITE_ONLY,
-        ecallGen = true, wfiGenAsNop = true, withPrivilegedDebug = withJtag, xtvecModeGen = false, debugTriggers = 8)),
+        ecallGen = true, wfiGenAsNop = true, withPrivilegedDebug = withJtag, xtvecModeGen = false,
+        debugTriggers = if (withJtag) hardwareBreakpointCount else 0)),
       hwFpu.map(x => new FpuPlugin(p = x)).orNull,
       mulDivOptions.map(_.mulUnrollFactor.getOrElse(0) == 0 generate new MulPlugin(
         inputBuffer = true,
