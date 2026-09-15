@@ -14,16 +14,19 @@ misbehaving — which is when you need both.
 
 This Spinal PMB `rsp.error` is forwarded from Wishbone ERR and from miss /
 timeout completers. A load that faults is a RISC-V access fault (`mcause` 5)
-when Vex `catchAccessFault` / cached `catchAccessError` is on. Stores on
-`DBusSimplePlugin` still retire without `mcause` 7: that plugin only samples
-`dBus.rsp.error` on loads.
+when Vex `catchAccessFault` / cached `catchAccessError` is on. A store that
+sees `rsp.error` while `storeFaultWatch` is held is `mcause` 7
+(`DBusSimplePlugin`, up to `storeFaultWatchCycles` after cmd for deep pipes).
 
 ## Solution
 
 **Always finish the cycle.** A miss, timeout, or unimplemented offset returns a
-fixed sentinel (never `0`) so software can tell failure modes apart. Loads also
-set `rsp.error` so the CPU can take an access fault. Stores complete on the
-bus; `DBusSimplePlugin` does not trap them.
+fixed sentinel (never `0`) so software can tell failure modes apart. Loads and
+erroring stores set `rsp.error` so the CPU can take an access fault. Successful
+RAM/CSR writes stay posted (no rsp).
+
+**PMB decoder:** write-error `rsp.valid` must not debit the read-only pending
+counter (that underflow wedged Soft-IP plant miss stores).
 
 **Optionally record the event.** A second FlowLogger — same block and CSR layout
 as EventLogger, separate RAM — sits at `0xe0008000` (`BusErrorLogger`). Interrupt

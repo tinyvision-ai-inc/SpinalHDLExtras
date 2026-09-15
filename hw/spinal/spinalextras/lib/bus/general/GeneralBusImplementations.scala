@@ -38,7 +38,9 @@ package object general {
     override def decodeMissTarget() = {
       val bus = DBusSimpleBus(bigEndian)
       bus.cmd.ready := True
-      bus.rsp.ready := RegNext(bus.cmd.valid && !bus.cmd.wr) init(False)
+      /* Reads and writes both get an error rsp (DECERR). Posted OK writes on
+       * real slaves still omit rsp; only the miss path answers writes. */
+      bus.rsp.ready := RegNext(bus.cmd.fire) init(False)
       bus.rsp.error := True
       bus.rsp.data := BusErrorSentinel.tile(bus.rsp.data.getWidth, BusErrorSentinel.DECERR)
       val ev = Flow(BusErrorEvent())

@@ -56,8 +56,16 @@ case class PipelinedMemoryBusInterface(bus: PipelinedMemoryBus, sizeMap: SizeMap
   if (spinalextras.lib.bus.BusError.loggingEnabled) {
     val unimpl = Flow(spinalextras.lib.bus.BusErrorEvent())
     unimpl.setName((if (bus.name != null && bus.name.nonEmpty) bus.name else "pmb") + "_unimpl")
-    unimpl.valid := doRead && bus_slverr || doWrite && bus_slverr
-    unimpl.payload.assign(bus.cmd.address, bus.cmd.write, spinalextras.lib.bus.BusErrorMaster.DBus, spinalextras.lib.bus.BusErrorCause.UNIMPL, spinalextras.lib.bus.BusErrorSentinel.UNIMPL)
+    /* bus_slverr is read-only without SecFireWall. Hole writes: reg_wrerr is
+     * True with wrRsp (cycle after doWrite), not on the doWrite cycle. */
+    val wrAddr = RegNextWhen(bus.cmd.address, doWrite)
+    unimpl.valid := (doRead && bus_slverr) || (wrRsp && reg_wrerr)
+    unimpl.payload.assign(
+      Mux(wrRsp && reg_wrerr, wrAddr, bus.cmd.address),
+      wrRsp && reg_wrerr,
+      spinalextras.lib.bus.BusErrorMaster.DBus,
+      spinalextras.lib.bus.BusErrorCause.UNIMPL,
+      spinalextras.lib.bus.BusErrorSentinel.UNIMPL)
     spinalextras.lib.bus.BusError.unimplTap(unimpl, spinalextras.lib.bus.BusErrorMaster.DBus)
   }
 
