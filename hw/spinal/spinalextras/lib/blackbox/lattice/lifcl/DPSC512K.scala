@@ -68,19 +68,22 @@ class DPSC512K(
   mapCurrentClockDomain(clock=io.CLK)
 }
 
-class DPSC512K_Mem(target_latency : Int = 2, read_write_ports : Int = 2, initialContent : Seq[BigInt] = Seq()) extends HardwareMemory[Bits]() {
+class DPSC512K_Mem(target_latency : Int = 2, read_write_ports : Int = 2, initialContent : Seq[BigInt] = Seq(),
+                   registerCmd : Boolean = false) extends HardwareMemory[Bits]() {
   override val requirements = MemoryRequirement(
     Bits(32 bits), (1 << 14), read_write_ports, 0, 0
   )
-  override lazy val latency : Int = target_latency
-  assert(latency == 2 || latency == 1)
+  /* HIP CSA/CSB is a real timing endpoint. registerCmd adds a cmd flop and
+   * +1 latency; default off so existing FIFOs keep target_latency. */
+  override lazy val latency : Int = target_latency + (if (registerCmd) 1 else 0)
+  assert(target_latency == 2 || target_latency == 1)
   assert(read_write_ports == 2 || read_write_ports == 1)
 
   override def init(initialContents : Seq[BigInt]): Unit = {
     mem.init(initialContents)
   }
 
-  val outreg = latency == 2
+  val outreg = target_latency == 2
   val mem = new DPSC512K(OUTREG = outreg)
 
   if(initialContent.size == 0) {
@@ -90,18 +93,21 @@ class DPSC512K_Mem(target_latency : Int = 2, read_write_ports : Int = 2, initial
   val mem_port_b = (mem.io.DIB, mem.io.ADB, mem.io.WEB, mem.io.CSB, mem.io.BENB_N, mem.io.DOB)
   for(port_maps <- io.readWritePorts.zip(Seq(mem_port_a, mem_port_b))) {
     val (port, (di, adr, we, cs, benb, dout)) = port_maps
-    di := port.cmd.data
-    adr := port.cmd.address.asBits
-    we := port.cmd.write
-    cs := port.cmd.valid
-    benb := ~port.cmd.mask
+    val cmdV = if (registerCmd) RegNext(port.cmd.valid) init False else port.cmd.valid
+    val cmdW = if (registerCmd) RegNext(port.cmd.write) init False else port.cmd.write
+    di := (if (registerCmd) RegNext(port.cmd.data) else port.cmd.data)
+    adr := (if (registerCmd) RegNext(port.cmd.address).asBits else port.cmd.address.asBits)
+    we := cmdW
+    cs := cmdV
+    benb := (if (registerCmd) RegNext(~port.cmd.mask) else ~port.cmd.mask)
+    val readHit = if (registerCmd) cmdV && !cmdW else port.readFire
 
     port.rsp.data := dout
 
-    if(latency == 2) {
-      port.rsp.valid := RegNext(RegNext(port.readFire, False), False)
+    if(target_latency == 2) {
+      port.rsp.valid := RegNext(RegNext(readHit, False), False)
     } else {
-      port.rsp.valid := RegNext(port.readFire, False)
+      port.rsp.valid := RegNext(readHit, False)
     }
   }
 }
