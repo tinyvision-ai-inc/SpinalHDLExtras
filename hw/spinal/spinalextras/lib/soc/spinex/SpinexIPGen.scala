@@ -84,7 +84,14 @@ case class SpinexSpecification(@JsonPropertyDescription("The target CPU clock. T
                                withUart: Boolean = true,
                                withI2C: Boolean = true,
                                withXip: Boolean = true,
-                               hardwareBreakpointCount: Int = 3,
+                               @JsonPropertyDescription("Collect interconnect faults into a FlowLogger RAM at 0xe0008000 and IRQ the hart. Miss/timeout still complete the bus when this is false.")
+                               withBusErrorLogger: Boolean = true,
+                               @JsonPropertyDescription("Event FIFO depth for the bus-error FlowLogger. Ignored when withBusErrorLogger is false. Default 32.")
+                               busErrorLogDepth: Int = 32,
+                               @JsonPropertyDescription("Per-channel skid for the bus-error FlowLogger (Flow.toStream queue). 0 drops same-cycle/backpressured events. Default 4.")
+                               busErrorLocalDepth: Int = 4,
+                               @JsonPropertyDescription("Sdtrig execute-match slots for OpenOCD hbreak (CsrPlugin.debugTriggers). Power of two; 0 disables. Needed for XIP flash where ebreak cannot be planted.")
+                               hardwareBreakpointCount: Int = 4,
                                externalInterrupts: Int = 8,
                                performanceOptions: SpinexPerformanceOptions = SpinexPerformanceOptions(),
                                peripherals: Seq[SlavePeripheral] = Seq(),
@@ -110,6 +117,9 @@ case class SpinexSpecification(@JsonPropertyDescription("The target CPU clock. T
       xipConfig = xipCfg,
       withUart = withUart,
       withI2C = withI2C,
+      withBusErrorLogger = withBusErrorLogger,
+      busErrorLogDepth = busErrorLogDepth,
+      busErrorLocalDepth = busErrorLocalDepth,
       mulDivOptions = performanceOptions.hwMulDiv,
       dcacheConfig = performanceOptions.dCache.map(cfg => (DataCacheConfig(
         cacheSize = cfg.cacheSize,
@@ -137,7 +147,8 @@ case class SpinexSpecification(@JsonPropertyDescription("The target CPU clock. T
         twoCycleCache = true
       )),
       withFullBarrel = performanceOptions.withFullBarrel,
-      hwFpu = performanceOptions.hwFpu.map(_())
+      hwFpu = performanceOptions.hwFpu.map(_()),
+      hardwareBreakpointCount = hardwareBreakpointCount
     ).copy(
       onChipRamSize = onChipRamSize,
       pipelineDBus = pipelineDBus,

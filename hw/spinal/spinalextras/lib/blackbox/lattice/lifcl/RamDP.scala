@@ -10,7 +10,9 @@ case class LscRamDpTrue(
                          rdAddressWidth: Int,
                          rdDataWidth: Int,
                          wrMaskEnable: Boolean,   // "true"/"false" or "1"/"0" depending on FPGA expects
-                         wrMaskWidth: Int
+                         wrMaskWidth: Int,
+                         regModeA: String = "noreg",
+                         regModeB: String = "noreg"
                        ) extends BlackBox {
 
   // Set the RTL name
@@ -24,14 +26,18 @@ case class LscRamDpTrue(
   addGeneric("ADDR_DEPTH_B", wordCount)
   addGeneric("ADDR_WIDTH_B", rdAddressWidth)
   addGeneric("DATA_WIDTH_B", rdDataWidth)
+  addGeneric("REGMODE_A", regModeA)
+  addGeneric("REGMODE_B", regModeB)
   addGeneric("GSR", "enable")
   addGeneric("MODULE_TYPE", "ram_dp_true")
   addGeneric("BYTE_ENABLE_A", wrMaskEnable)
-  addGeneric("BYTE_SIZE_A", wrMaskWidth)
+  addGeneric("BYTE_SIZE_A", 8)
   addGeneric("BYTE_EN_POL_A", "active-high")
   addGeneric("WRITE_MODE_A", "normal")
   addGeneric("BYTE_ENABLE_B", wrMaskEnable)
-  addGeneric("BYTE_SIZE_B", wrMaskWidth)
+  addGeneric("BYTE_SIZE_B", 8)
+  addGeneric("BYTE_EN_POL_B", "active-high")
+  addGeneric("WRITE_MODE_B", "normal")
   addGeneric("MEM_ID", "MEM0")
 
   def init(initialContents : Seq[BigInt]): Unit = {
@@ -79,16 +85,20 @@ case class LscRamDpTrue(
 }
 
 
-class LscRamDpTrue_Mem[T <: Data](_requirements : MemoryRequirement[T]) extends HardwareMemory[T]() {
+class LscRamDpTrue_Mem[T <: Data](_requirements : MemoryRequirement[T], target_latency : Int = 1) extends HardwareMemory[T]() {
   override def requirements: MemoryRequirement[T] = _requirements
 
-  override lazy val latency : Int = 1
+  override lazy val latency : Int = target_latency
+  assert(latency == 1 || latency == 2)
 
   assert(requirements.initialContent == null || requirements.initialContent.isEmpty)
 
+  val regMode = if (latency == 2) "reg" else "noreg"
+
   val mem = new LscRamDpTrue(
     wordCount = requirements.num_elements, wrAddressWidth = log2Up(requirements.num_elements), wrDataWidth = requirements.dataType.getBitsWidth,
-    rdAddressWidth = log2Up(requirements.num_elements), rdDataWidth = requirements.dataType.getBitsWidth, wrMaskEnable = requirements.needsMask, wrMaskWidth = requirements.dataType.getBitsWidth / 8
+    rdAddressWidth = log2Up(requirements.num_elements), rdDataWidth = requirements.dataType.getBitsWidth, wrMaskEnable = requirements.needsMask, wrMaskWidth = requirements.dataType.getBitsWidth / 8,
+    regModeA = regMode, regModeB = regMode
   )
 
   override def init(initialContents : Seq[BigInt]): Unit = {
@@ -109,7 +119,7 @@ class LscRamDpTrue_Mem[T <: Data](_requirements : MemoryRequirement[T]) extends 
     we := port.cmd.write
     cs := port.cmd.valid
     if(port.cmd.mask != null)
-      benb := ~port.cmd.mask
+      benb := port.cmd.mask
     else
       benb.setAll()
 

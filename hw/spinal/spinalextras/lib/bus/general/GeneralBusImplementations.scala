@@ -1,10 +1,9 @@
 package spinalextras.lib.bus
 
 import spinal.core.{Bits, Bool, False, HardType, Mux, Reg, RegNext, True, UInt, cloneOf, when}
-import spinal.lib.{Fragment, Stream}
+import spinal.lib.{Flow, Fragment, Stream}
 import spinal.lib.com.spi.ddr.SpiXdrMasterCtrl.{XipBus, XipBusParameters, XipCmd}
 import spinal.lib.cpu.riscv.debug.DebugModuleCmdErr.BUS
-import spinalextras.lib.bus.general.GeneralBusInterface
 import vexriscv.ip.{DataCacheConfig, DataCacheMemBus, DataCacheMemCmd, DataCacheMemRsp, InstructionCacheConfig, InstructionCacheMemBus, InstructionCacheMemCmd, InstructionCacheMemRsp}
 import vexriscv.plugin.{DBusSimpleBus, DBusSimpleCmd, DBusSimpleRsp}
 
@@ -39,9 +38,16 @@ package object general {
     override def decodeMissTarget() = {
       val bus = DBusSimpleBus(bigEndian)
       bus.cmd.ready := True
-      bus.rsp.ready := RegNext(bus.cmd.valid && !bus.cmd.wr) init(False)
+      /* Reads and writes both get an error rsp (DECERR). Posted OK writes on
+       * real slaves still omit rsp; only the miss path answers writes. */
+      bus.rsp.ready := RegNext(bus.cmd.fire) init(False)
       bus.rsp.error := True
-      bus.rsp.data := 0xDEADBEEFL
+      bus.rsp.data := BusErrorSentinel.tile(bus.rsp.data.getWidth, BusErrorSentinel.DECERR)
+      val ev = Flow(BusErrorEvent())
+      ev.setName("dbus_decode_miss")
+      ev.valid := bus.cmd.fire
+      ev.payload.assign(bus.cmd.address, bus.cmd.wr, BusErrorMaster.DBus, BusErrorCause.DECERR)
+      BusError.reportFlow(ev)
       bus
     }
 
@@ -83,7 +89,7 @@ package object general {
       bus.cmd.ready := True
       bus.rsp.valid := RegNext(bus.cmd.valid && !bus.cmd.wr) init(False)
       bus.rsp.error := True
-      bus.rsp.data := 0xDEADBEEFL
+      bus.rsp.data := BusErrorSentinel.tile(bus.rsp.data.getWidth, BusErrorSentinel.DECERR)
       bus
     }
 
@@ -134,7 +140,7 @@ package object general {
       bus.cmd.ready := False
       bus.rsp.valid := False
       bus.rsp.error := True
-      bus.rsp.data.assignDontCare()
+      bus.rsp.data := BusErrorSentinel.tile(bus.rsp.data.getWidth, BusErrorSentinel.DECERR)
 
 
       val rspRequired = rsp_required_count(bus)
@@ -195,7 +201,7 @@ package object general {
 
     override def map_rsp_read_error(input: BUS): Unit = {
       input.rsp.valid := True
-      input.rsp.fragment.assignFromBits(0xdeadbeefL)
+      input.rsp.fragment := BusErrorSentinel.tile(input.rsp.fragment.getWidth, BusErrorSentinel.DECERR)
     }
   }
 }

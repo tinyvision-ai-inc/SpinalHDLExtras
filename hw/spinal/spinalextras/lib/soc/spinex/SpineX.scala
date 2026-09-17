@@ -39,6 +39,11 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
   }
   noIoPrefix()
 
+  /** Driven from TinyClunx / WB interconnect; idle on SpinexMinimal. */
+  var axiUsbBusErrorIn: Flow[spinalextras.lib.bus.BusErrorEvent] = null
+  var axiMmiBusErrorIn: Flow[spinalextras.lib.bus.BusErrorEvent] = null
+  var wbBusErrorIn: Flow[spinalextras.lib.bus.BusErrorEvent] = null
+
   val mainClockDomain = ClockDomain.current
 
   val resetCtrlClockDomain = ClockDomain(
@@ -65,6 +70,13 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
     }
 
     val systemReset  = RegNext(mainClkResetUnbuffered, init = True)
+
+    // Debug Module / DTM clock domain reset: FPGA BOOT known-state + one-shot
+    // Timeout only. Never clear() on board/softwareReset — that was wedging
+    // OpenOCD (DM shared systemReset). Power cycle or bitstream reload re-inits
+    // via BOOT. OpenOCD can still reset DM logic via dmcontrol.dmactive.
+    val debugPorTimeout = Timeout(10 us)
+    val debugReset = RegNext(!debugPorTimeout, init = True)
   }
 
   val systemClockDomain = ClockDomain(
@@ -77,7 +89,16 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
     frequency = mainClockDomain.frequency
   )
 
-  val debugClockDomain = systemClockDomain
+  val debugClockDomain = ClockDomain(
+    clock = mainClockDomain.readClockWire,
+    reset = resetCtrl.debugReset,
+    config = ClockDomainConfig(
+      resetActiveLevel = HIGH,
+      resetKind = SYNC
+    ),
+    frequency = mainClockDomain.frequency
+  )
+  debugClockDomain.setSynchronousWith(systemClockDomain)
 
   var interconnect, directInterconnect: MultiInterconnectByTag = null
 
@@ -245,6 +266,12 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
       master = apbBridge.io.apb,
       slaves = apbMapping
     )
+    val apbIn = apbBridge.io.apb
+    val apbMiss = Flow(spinalextras.lib.bus.BusErrorEvent())
+    apbMiss.setName("apb_decode_miss")
+    apbMiss.valid := apbIn.PSEL.lsb && apbIn.PENABLE && apbDecoder.io.output.PSEL === 0
+    apbMiss.payload.assign(apbIn.PADDR.resize(32 bits), apbIn.PWRITE, spinalextras.lib.bus.BusErrorMaster.DBus, spinalextras.lib.bus.BusErrorCause.DECERR)
+    spinalextras.lib.bus.BusError.reportFlow(apbMiss)
 
     val stagedBridge = PipelinedMemoryBus(32, 32).setName("interconnect")
     interconnect.addMaster(PipelinedMemoryBusMultiBus(stagedBridge.cmdM2sPipe().cmdS2mPipe().rspPipe().setName("interconnect_staged")), "dBus")

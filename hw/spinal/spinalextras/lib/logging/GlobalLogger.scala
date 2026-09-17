@@ -146,7 +146,9 @@ class GlobalLogger {
 
   def build(sysBus: BusSlaveProvider, address: BigInt, depth: Int, name: String,
             ctrlStreams: Option[(Stream[Bits], Flow[Bits])] = None,
-            tags: Set[String] = Set(), localDepth : Int = 0): Unit = {
+            tags: Set[String] = Set(), localDepth : Int = 0, irq: Bool = null,
+            atToplevel: Boolean = true,
+            flowLoggerConfig: FlowLoggerConfig = null): Unit = {
     val clockDomain = ctrlStreams.map(_._1.valid.clockDomain).getOrElse(ClockDomain.current)
 
     if (built) {
@@ -168,14 +170,16 @@ class GlobalLogger {
     val loggerName = name
     new ClockingArea(clockDomain) {
       if (signals.nonEmpty && depth > 0) {
-        val ctx = Component.push(Component.toplevel)
-        val logger = FlowLogger(FlowLoggerConfig(localDepth = localDepth), signals)
+        val ctx = if (atToplevel) Component.push(Component.toplevel) else null
+        val logger = FlowLogger(
+          if (flowLoggerConfig != null) flowLoggerConfig else FlowLoggerConfig(localDepth = localDepth),
+          signals)
         logger.setName(loggerName)
         logger.add_comments(comments)
         FlowLoggerYaml(logger, output_path)
-        logger.create_logger_port(sysBus, address, depth, ctrlStreams)
+        logger.create_logger_port(sysBus, address, depth, ctrlStreams, irq)
 
-        ctx.restore()
+        if (ctx != null) ctx.restore()
       } else {
         val ctx = Component.push(Component.toplevel)
         ctrlStreams.foreach(_._1.setIdle())
@@ -214,7 +218,7 @@ class GlobalLogger {
     SimulationLoggerHandle(outStream, yamlPath = s"$dir/GlobalLogger.logger_defs.yml", defaultDir = dir)
   }
 
-  def create_logger_port(sysBus: BusSlaveProvider, address: BigInt, depth: Int, name: String, ctrlStreams: Option[(Stream[Bits], Flow[Bits])] = None, tags: Set[String] = Set(), localDepth : Int = 0): Unit = {
+  def create_logger_port(sysBus: BusSlaveProvider, address: BigInt, depth: Int, name: String, ctrlStreams: Option[(Stream[Bits], Flow[Bits])] = None, tags: Set[String] = Set(), localDepth : Int = 0, irq: Bool = null): Unit = {
     sysBus.retain()
 
     retain()
@@ -224,7 +228,7 @@ class GlobalLogger {
 
     hardFork {
       lock.await()
-      this.build(sysBus, address, depth, name, ctrlStreams, tags, localDepth = localDepth)
+      this.build(sysBus, address, depth, name, ctrlStreams, tags, localDepth = localDepth, irq = irq)
       sysBus.release()
     }
   }
@@ -270,7 +274,7 @@ object GlobalLogger {
   }
 
   def create_logger_port(sysBus: BusSlaveProvider, address: BigInt, depth: Int, name: String = Component.toplevel.name + "Logger",
-                         ctrlStreams: Option[(Stream[Bits], Flow[Bits])] = None, tags: Set[String] = Set(), localDepth : Int = 0): Unit = {
-    get().create_logger_port(sysBus, address, depth, name = name, ctrlStreams = ctrlStreams, tags = tags, localDepth = localDepth)
+                         ctrlStreams: Option[(Stream[Bits], Flow[Bits])] = None, tags: Set[String] = Set(), localDepth : Int = 0, irq: Bool = null): Unit = {
+    get().create_logger_port(sysBus, address, depth, name = name, ctrlStreams = ctrlStreams, tags = tags, localDepth = localDepth, irq = irq)
   }
 }

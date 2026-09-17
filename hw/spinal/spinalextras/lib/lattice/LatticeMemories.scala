@@ -52,13 +52,19 @@ object LatticeMemories {
 
   def apply[T <: Data](memKind: MemTechnologyKind)(requirements: MemoryRequirement[T]): HardwareMemory[T] = {
     val allocationSize = (requirements.dataType.getBitsWidth.min(32) * requirements.num_elements) / 8
-
-    val shouldUseLRam = (memKind.technologyKind.toLowerCase == "lram" || allocationSize > (10 KiB))
+    val kind = memKind.technologyKind.toLowerCase
+    /* ramBlock / ebr: always EBR (TRB/event Meta). lram: force LRAM. else size heuristic. */
+    val forceEbr = kind == "ramblock" || kind == "ebr" || kind == "blockram"
+    val forceLram = kind == "lram"
+    val shouldUseLRam = !forceEbr && (forceLram || allocationSize > (10 KiB))
     val lram_factory = find_lram(requirements)
 
     if (shouldUseLRam && lram_factory.isDefined) {
       new StackedHardwareMemory(requirements, lram_factory.get)
     } else {
+      if (forceEbr) {
+        SpinalInfo(s"Using EBR (ramBlock) for ${requirements}")
+      }
       (requirements.numReadPorts, requirements.numWritePorts, requirements.numReadWritePorts) match {
         case (1, 1, 0) => new LscRamDpTrue_Mem(requirements)
         case (0, 0, 2) => new LscRamDpTrue_Mem(requirements)

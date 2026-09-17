@@ -102,12 +102,15 @@ case class GeneralBusDecoder[T <: Data with IMasterSlave](val busAccesor: Genera
     rspPendingCounter.io.decrease.ready := io.input.rspFired
 
     val rspHits = RegNextWhen(hits, rspPendingCounter.io.increaseBy.fire)
-
+    /* Write-error rsps are not tracked in rspPendingCounter. Route them with
+     * the hit vector from the last cmd (read or write). */
+    val lastCmdHits = RegNextWhen(hits, io.input.cmd.fire)
     val rspPending = CombInit(rspPendingCounter.io.decrease.valid)
+    val routeHits = Mux(rspPending, rspHits, lastCmdHits)
 
     val output_rsp = Stream(io.input.rsp.payload)
     output_rsp.valid := outputsWithDefault.map(_.rsp.fire).orR
-    output_rsp.payload := outputsWithDefault.map(_.rsp.payload).read(OHToUInt(rspHits))
+    output_rsp.payload := outputsWithDefault.map(_.rsp.payload).read(OHToUInt(routeHits))
     busAccesor.map_rsp(io.input, output_rsp)
 
     val cmdWait = (io.input.cmd.valid && rspPending && hits =/= rspHits) || (!rspPendingCounter.io.increaseBy.ready && latchFirstValid)
