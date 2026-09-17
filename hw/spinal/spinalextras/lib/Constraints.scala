@@ -21,7 +21,8 @@ import scala.collection.mutable.ArrayBuffer
 
 class Constraints {
   val clocks = new mutable.ArrayBuffer[(Data, HertzNumber)]()
-  val generated_clocks = new mutable.ArrayBuffer[(Data, Data, Long, Long)]()
+  /* dest, source, mul, div, destFreq. mul/div are reduced destHz/sourceHz. */
+  val generated_clocks = new mutable.ArrayBuffer[(Data, Data, Long, Long, HertzNumber)]()
   val max_skews = new mutable.ArrayBuffer[(Seq[Data], TimeNumber)]()
   val clock_groups = new mutable.ArrayBuffer[(Seq[Data], Boolean)]()
   val constraints = new mutable.ArrayBuffer[(Seq[Data], Map[String, String])]()
@@ -92,12 +93,22 @@ class Constraints {
       s"[get_pins -hierarchical {*${source.getRtlPath()}}]"
     } else {
       generated_clocks.collectFirst {
-        case (d, _, _, _) if portLeaf(d) == "CLKOS3" =>
+        case (d, _, _, _, _) if portLeaf(d) == "CLKOS3" =>
           s"[get_pins -hierarchical {*${d.getRtlPath()}}]"
       }.orElse {
         if (toplevel.getAllIo.exists(_.getName() == "clk")) Some("[get_ports {clk}]") else None
       }.getOrElse(clockTarget(source, toplevel))
     }
+  }
+
+  /* CPE renames IP CLKOP → u_<inst>_CLKOP. Bare names miss; globs match. */
+  private def pllClockGetClocksGlob(pllNames: Seq[String]): String = {
+    val globs = pllNames.map {
+      case "CLKOP" => "*CLKOP"
+      case n if n.startsWith("CLKOS") => s"*$n"
+      case n => s"*$n"
+    }.distinct
+    s"[get_clocks {${globs.mkString(" ")}}]"
   }
 
   private def hierarchicalClockTarget(data: Data, toplevel: Component): String = {
@@ -157,13 +168,23 @@ class Constraints {
       }
     }
 
-    for ((dest, source, mul, div) <- generated_clocks) {
-      val cname =
-        if (hasPort("spiflash_clk") && !isPllGeneratedDest(dest) && !isSoftDphyByteClock(portLeaf(dest)))
-          "spiflash_clk"
-        else
-          clockNameFor(dest, report.toplevel)
-      file.println(s"create_generated_clock -name {${cname}} -source ${generatedClockSource(dest, source, report.toplevel)} -multiply_by ${mul} -divide_by ${div} ${generatedClockDest(dest, report.toplevel)}")
+    for ((dest, source, mul, div, destFreq) <- generated_clocks) {
+      val isSpiPad =
+        hasPort("spiflash_clk") && !isPllGeneratedDest(dest) && !isSoftDphyByteClock(portLeaf(dest))
+      if (isSpiPad) {
+        /* Pad SCK (UAB). create_generated_clock from a PLL output keeps SCK
+         * related to CLKOS2; CPE then renames CLKOP so the SPI↔PLL async group
+         * misses and STA demands a ~3 ns related edge. create_clock + async
+         * group is the honest model. */
+        val periodNs = destFreq.toTime.toDouble * 1e9
+        file.println(s"# spiflash_clk ${destFreq.decompose} (pad; not PLL-generated)")
+        file.println(s"create_clock -name {spiflash_clk} -period ${periodNs} [get_ports {spiflash_clk}]")
+      } else {
+        val cname = clockNameFor(dest, report.toplevel)
+        file.println(
+          s"create_generated_clock -name {${cname}} -source ${generatedClockSource(dest, source, report.toplevel)} -multiply_by ${mul} -divide_by ${div} ${generatedClockDest(dest, report.toplevel)}"
+        )
+      }
     }
 
     if (hasPort("jtag_tck")) {
@@ -171,18 +192,20 @@ class Constraints {
     }
 
     val spiGenNames = generated_clocks
-      .filterNot { case (dest, _, _, _) => isPllGeneratedDest(dest) }
-      .map { case (dest, _, _, _) =>
+      .filterNot { case (dest, _, _, _, _) => isPllGeneratedDest(dest) }
+      .map { case (dest, _, _, _, _) =>
         if (hasPort("spiflash_clk")) "spiflash_clk" else clockNameFor(dest, report.toplevel)
       }
     val pllGenNames = generated_clocks
-      .filter { case (dest, _, _, _) => isPllGeneratedDest(dest) }
-      .map { case (dest, _, _, _) => clockNameFor(dest, report.toplevel) }
+      .filter { case (dest, _, _, _, _) => isPllGeneratedDest(dest) }
+      .map { case (dest, _, _, _, _) => clockNameFor(dest, report.toplevel) }
     val spiClockName = spiGenNames.headOption.orElse(
       if (hasPort("spiflash_clk")) Some("spiflash_clk") else None
     )
     if (spiClockName.nonEmpty && pllGenNames.nonEmpty) {
-      file.println(s"set_clock_groups -asynchronous -group [get_clocks {${spiClockName.get}}] -group [get_clocks {${pllGenNames.mkString(" ")}}]")
+      file.println(
+        s"set_clock_groups -asynchronous -group [get_clocks {${spiClockName.get}}] -group ${pllClockGetClocksGlob(pllGenNames)}"
+      )
     }
 
     // set_clock_uncertainty and pad false_paths (led/uart/i2c) belong on the
@@ -577,7 +600,7 @@ object Constraints {
     val fromHz = math.round(sourceFreq.toDouble)
     val toHz = math.round(destFreq.toDouble)
     val g = BigInt(fromHz).gcd(BigInt(toHz)).toLong
-    constraints.generated_clocks.append((dest, source, toHz / g, fromHz / g))
+    constraints.generated_clocks.append((dest, source, toHz / g, fromHz / g, destFreq))
   }
   def set_max_skew(max_skew: TimeNumber, d: Data*) = {
     check()
