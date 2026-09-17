@@ -109,7 +109,9 @@ class LscRamDpTrue_Mem[T <: Data](_requirements : MemoryRequirement[T]) extends 
     we := port.cmd.write
     cs := port.cmd.valid
     if(port.cmd.mask != null)
-      benb := ~port.cmd.mask
+      /* ben_*_i is BYTE_EN_POL active-high; Spinal mask is SEL-style. Do not invert
+       * (DPSC512K BEN*_N is the active-low primitive). */
+      benb := port.cmd.mask
     else
       benb.setAll()
 
