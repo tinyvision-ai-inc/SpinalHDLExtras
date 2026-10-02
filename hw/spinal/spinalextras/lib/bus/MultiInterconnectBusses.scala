@@ -458,6 +458,10 @@ package object bus {
 
   MultiInterconnectConnectFactory.AddHandler { case (m: DBusSimpleBusExt, s: PipelinedMemoryBusMultiBus) => new Composite(m.bus, "dbus_to_pmb") with HasFormalProperties {
     m.bus.toPipelinedMemoryBus() >> s.bus
+    // DBusSimpleBus.toPipelinedMemoryBus() (VexRiscv) does not forward the
+    // response error, which leaves rsp.error undriven on decoder outputs
+    // (Spinex load/store access faults). Forward it from the slave here.
+    m.bus.rsp.error := s.bus.rsp.error
 
     override protected def formalProperties() = new FormalProperties(this) {
       addFormalProperty(new DBusSimpleFormal(m.bus).contract.outstandingReads.asUInt === s.bus.contract.outstandingReads.value, "Oustanding reads match")

@@ -52,6 +52,7 @@ object MIPIDataTypes extends Enumeration {
   val RAW10 = Value(0x2B)
   val RAW12 = Value(0x2C)
   val RAW14 = Value(0x2D)
+  val RAW16 = Value(0x2E)
 
   val UserDefined8BitDataType1 = Value(0x30)
   val UserDefined8BitDataType2 = Value(0x31)
@@ -87,6 +88,7 @@ object MIPIDataTypes extends Enumeration {
       case RAW10 => 10
       case RAW12 => 12
       case RAW14 => 14
+      case RAW16 => 16
       case UserDefined8BitDataType1 => ???
       case UserDefined8BitDataType2 => ???
       case UserDefined8BitDataType3 => ???

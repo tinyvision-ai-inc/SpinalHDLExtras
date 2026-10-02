@@ -238,6 +238,10 @@ abstract class IPGenerator_[CFG : ClassTag] extends IPGenerator {
         if (options.instance_name.nonEmpty)
           top.setDefinitionName(options.sanitized_instance_name)
         top.noIoPrefix()
+        // Spinal re-runs this block when it restarts elaboration with a
+        // scala trace; start from an empty port list each time or the
+        // _top.sv wrapper ends up with every port declared twice.
+        top_signals.clear()
         top.getAllIo.foreach(w => {
           val dir = w.getDirection match {
             case `in`    => "input"

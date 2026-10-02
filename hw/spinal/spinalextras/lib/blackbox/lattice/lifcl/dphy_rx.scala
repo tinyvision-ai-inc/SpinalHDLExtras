@@ -600,6 +600,14 @@ class dphy_rx(cfg : MIPIConfig,
           "MIPI reference data type. Long packets whose data type matches this value assert lp_av_en_o. Resets to the refDt from the config.") init (default_ref_dt)
         GlobalSignals.externalize(io.packet_parser.ref_dt_i) :=
           crossClock(ref_dt_ctrl, ref_dt, io.byte_clock_domain(), default_ref_dt).asBits
+      } else {
+        /* LMMI Soft-DPHY has no parallel ref_dt pin. Firmware still loads
+         * +0x10 after STREAMON. A shadow ACKs that load. The live DT filter
+         * stays LMMI register 0x27. */
+        val default_ref_dt = cfg.refDt.id
+        val ref_dt_ctrl = busSlaveFactory.newRegAt(base + dphy_rx.OffRefDt, "ref_dt")(SymbolName("ref_dt"))
+        ref_dt_ctrl.field(UInt(6 bits), RW,
+          "Readable ref_dt shadow (no parallel ref_dt pin)") init (default_ref_dt)
       }
 
       /*
@@ -631,6 +639,23 @@ class dphy_rx(cfg : MIPIConfig,
       val pktdelay = pktdelay_ctrl.field(UInt(16 bits), RO,
         "Soft-IP RX_FIFO_PKT_DLY (no DYN_RXFIFO_PKTDLY pin)")
       pktdelay := U(default_pktdly, 16 bits)
+    }
+
+    /* LMMI drops the parallel CSR pins, and the shared error-counter bank
+     * is not on this window. 0.1.7 lscc_csi2rx_dump loads these offsets
+     * immediately after +0x10. A zero RO register ACKs the load. */
+    if (io.rxcsr_datsettlecyc_i == null) {
+      def readableZero(off: Int, name: String): Unit = {
+        val r = busSlaveFactory.newRegAt(base + off, name)(SymbolName(name))
+        val f = r.field(UInt(32 bits), RO, name)
+        f := U(0, 32 bits)
+      }
+      readableZero(dphy_rx.OffClkMeasShort, "clk_meas_short")
+      readableZero(dphy_rx.OffHsSyncRise, "hs_sync_rise")
+      readableZero(dphy_rx.OffTermClkEn, "term_clk_en_rise")
+      readableZero(dphy_rx.OffHsDEn, "hs_d_en_o")
+      readableZero(dphy_rx.OffPayloadEn, "payload_en_o")
+      readableZero(dphy_rx.OffLpEn, "lp_en_o")
     }
 
     val _ = withErrorCounters

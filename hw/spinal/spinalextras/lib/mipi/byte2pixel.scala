@@ -52,6 +52,11 @@ case class byte2pixel(cfg : MIPIConfig,
     if(dw == 8)
       return d
 
+    // RAW16 is not bit-packed: a pixel is two whole bytes, least significant
+    // byte first on the wire, so pairs of bytes just get re-concatenated.
+    if(dw == 16)
+      return Vec(d.grouped(2).toSeq.map(pair => pair.last ## pair.head))
+
     // MIPI binary backing is sorta weird. It takes the 8 MS bits of each pixel and sends then in order, and then when
     // there are 8 'leftover' bits, thats the next byte
     assert(dw == 12 || dw == 10)
