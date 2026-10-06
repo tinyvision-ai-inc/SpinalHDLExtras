@@ -28,13 +28,14 @@ object LatticeMemories {
         } else {
           lram_available_maps(Component.toplevel) = lram_available - 1
           val latency = requirements.latencyRange._2.min(2)
-          /* Video fillers (PMB port 1 / LRAM CSB) on usb_trb_memory; leave CSA comb for USB AXI. */
-          val registerPortBCmd = requirements.label == "usb_trb_memory"
+          /* usb_trb_memory: register both LRAM cmd ports (CSA=USB AXI, CSB=video PMB). */
+          val registerUsbTrbLramCmd = requirements.label == "usb_trb_memory"
           SpinalInfo(s"Using LRAM for ${requirements}, ${lram_available} lrams remaining")
           (requirements.numReadPorts, requirements.numWritePorts, requirements.numReadWritePorts) match {
             case (1, 1, 0) => new PDPSC512K_Mem(target_latency = latency, initialContent = requirements.initialContent)
             case (0, 0, 1) => new DPSC512K_Mem(target_latency = latency, read_write_ports = 1, initialContent = requirements.initialContent)
-            case (0, 0, 2) => new DPSC512K_Mem(target_latency = latency, read_write_ports = 2, initialContent = requirements.initialContent, registerPortBCmd = registerPortBCmd)
+            case (0, 0, 2) => new DPSC512K_Mem(target_latency = latency, read_write_ports = 2, initialContent = requirements.initialContent,
+              registerPortACmd = registerUsbTrbLramCmd, registerPortBCmd = registerUsbTrbLramCmd)
           }
         }
       }
