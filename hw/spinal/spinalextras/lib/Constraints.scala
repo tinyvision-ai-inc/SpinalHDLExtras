@@ -319,14 +319,9 @@ class Constraints {
       }
     }
 
-    // USB23 HIP: AXI/LMMI inputs sampled inside (hold). INTERRUPT false-path
-    // lives in the board Soft-DPHY SDC (-hierarchical); IP emit becomes
-    // <ip_inst>/*/INTERRUPT and misses nested USB23_1.
-    if (report.toplevel.getAllIo.exists(_.getName().startsWith("usb23"))) {
-      for (pin <- Constraints.usb23HoldPinGlobs) {
-        file.println(s"set_false_path -hold -to [get_pins -hierarchical {$pin}]")
-      }
-    }
+    // USB23 AXI response inputs are registered at the primitive, so hold
+    // on those pins is a real path. The old set_false_path -hold list
+    // (usb23HoldPinGlobs) hid it. INTERRUPT stays in the board SDC.
 
     for ((datas, tags) <- constraints) {
       for(data <- datas) {
