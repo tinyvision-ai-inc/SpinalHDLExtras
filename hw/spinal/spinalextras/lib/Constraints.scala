@@ -129,6 +129,10 @@ class Constraints {
       (data.hasTag(Constraints.JtagPadClock) || data.getRtlPath().endsWith("jtag_tck"))
   }
 
+  /** Board SDC owns spiflash pad create_clock, I/O delay, and SPI↔PLL groups. */
+  private def boardOwnsSpiflashPads(toplevel: Component): Boolean =
+    toplevel.getAllIo.exists(_.getName() == "spiflash_clk")
+
   // PLL.scala dests keep CLKOP/CLKOS* (blackbox IO). XipFlashPlugin SCK does not.
   private def isPllGeneratedDest(data: Data): Boolean = {
     val leaf = portLeaf(data)
@@ -171,14 +175,16 @@ class Constraints {
     for ((dest, source, mul, div, destFreq) <- generated_clocks) {
       val isSpiPad =
         hasPort("spiflash_clk") && !isPllGeneratedDest(dest) && !isSoftDphyByteClock(portLeaf(dest))
-      if (isSpiPad) {
-        /* Pad SCK (UAB). create_generated_clock from a PLL output keeps SCK
-         * related to CLKOS2; CPE then renames CLKOP so the SPI↔PLL async group
-         * misses and STA demands a ~3 ns related edge. create_clock + async
-         * group is the honest model. */
+      if (isSpiPad && !boardOwnsSpiflashPads(report.toplevel)) {
+        /* Pad SCK (standalone top). Nested IP (flir_uab in UAB): board SDC
+         * create_clock + SPI↔PLL set_clock_groups. create_generated_clock from
+         * a PLL output keeps SCK related to CLKOS2; honest model is
+         * create_clock + async group on the board. */
         val periodNs = destFreq.toTime.toDouble * 1e9
         file.println(s"# spiflash_clk ${destFreq.decompose} (pad; not PLL-generated)")
         file.println(s"create_clock -name {spiflash_clk} -period ${periodNs} [get_ports {spiflash_clk}]")
+      } else if (isSpiPad) {
+        file.println(s"# skip spiflash_clk create_clock (board owns pad clock)")
       } else {
         val cname = clockNameFor(dest, report.toplevel)
         file.println(
@@ -202,7 +208,7 @@ class Constraints {
     val spiClockName = spiGenNames.headOption.orElse(
       if (hasPort("spiflash_clk")) Some("spiflash_clk") else None
     )
-    if (spiClockName.nonEmpty && pllGenNames.nonEmpty) {
+    if (spiClockName.nonEmpty && pllGenNames.nonEmpty && !boardOwnsSpiflashPads(report.toplevel)) {
       file.println(
         s"set_clock_groups -asynchronous -group [get_clocks {${spiClockName.get}}] -group ${pllClockGetClocksGlob(pllGenNames)}"
       )
@@ -222,15 +228,22 @@ class Constraints {
         file.println("set_output_delay -clock [get_clocks {jtag_tck}] -min 2.0 [get_ports {jtag_tdo}]")
       }
     }
-    // Pad I/O delays belong on the board SDC. Emit them from the IP only when
-    // the generated SCK is still the `spiflash_clk` port (unobfuscated top).
-    if (spiClockName.contains("spiflash_clk") && hasPort("spiflash_dq")) {
+    // Pad I/O delays belong on the board SDC when this IP is nested (UAB /
+    // tinyclunx33). Nested CPE merge retargets IP get_ports spiflash_* to
+    // CLKOP and invents bogus multi-ns setup failures on spiflash_dq.
+    if (
+      spiClockName.contains("spiflash_clk") && !boardOwnsSpiflashPads(report.toplevel) &&
+        hasPort("spiflash_dq")
+    ) {
       file.println("set_input_delay -clock [get_clocks {spiflash_clk}] -clock_fall -max 6.0 [get_ports {spiflash_dq*}]")
       file.println("set_input_delay -clock [get_clocks {spiflash_clk}] -clock_fall -min 1.5 [get_ports {spiflash_dq*}]")
       file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -max 2.0 [get_ports {spiflash_dq*}]")
       file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -min -3.0 [get_ports {spiflash_dq*}]")
     }
-    if (spiClockName.contains("spiflash_clk") && hasPort("spiflash_cs_n")) {
+    if (
+      spiClockName.contains("spiflash_clk") && !boardOwnsSpiflashPads(report.toplevel) &&
+        hasPort("spiflash_cs_n")
+    ) {
       file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -max 5.0 [get_ports {spiflash_cs_n}]")
       file.println("set_output_delay -clock [get_clocks {spiflash_clk}] -min -3.0 [get_ports {spiflash_cs_n}]")
     }
@@ -247,7 +260,10 @@ class Constraints {
       // at IP CPE scope that glob is empty and 1026001 (CPE then segfaults).
       file.println("set_max_skew [get_nets {jtag_tck* jtag_tdi* jtag_tms*}] 10.0")
     }
-    if (hasPort("spiflash_clk") && hasPort("spiflash_cs_n") && hasPort("spiflash_dq")) {
+    if (
+      hasPort("spiflash_clk") && hasPort("spiflash_cs_n") && hasPort("spiflash_dq") &&
+        !boardOwnsSpiflashPads(report.toplevel)
+    ) {
       file.println("set_max_skew [get_nets {spiflash_clk* spiflash_cs_n* spiflash_dq*}] 1.0")
     }
 
@@ -346,6 +362,9 @@ object Constraints {
 
   /** Same net as top `jtag_tck`. write_file already create_clocks the pad. */
   object JtagPadClock extends SpinalTag
+
+  /** Same net as top `spiflash_clk`. Board SDC owns pad timing when nested. */
+  object SpiflashPadClock extends SpinalTag
 
   private def withCdcPrefix(n: String): String =
     if (n.contains("cdc_")) n else s"cdc_$n"
