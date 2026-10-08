@@ -117,11 +117,72 @@ def path_glob_in_rtl(kind: str, pat: str, text: str, idents: set[str] | None = N
     return token_in_rtl(pat, text)
 
 
+def hierarchical_constraint_glob_plausible(pat: str, text: str) -> bool:
+    """Map/PAR or POSTSYN globs: LSR/PD are post-map pins; RTL must only expose anchors."""
+    work = pat
+    if work.endswith("/LSR") or work.endswith("/PD"):
+        work = work.rsplit("/", 1)[0]
+    literals = [p for p in re.split(r"[*?]+", work) if p]
+    for lit in literals:
+        lit = lit.strip("/")
+        if not lit:
+            continue
+        for seg in lit.split("/"):
+            if not seg or seg in ("LSR", "PD"):
+                continue
+            if seg.startswith("buffers_") or seg == "buffers":
+                if "buffers_" not in text and "cdc_cap" not in text:
+                    return False
+                continue
+            if seg not in text:
+                return False
+    return True
+
+
+def constraint_glob_in_rtl(
+    kind: str,
+    pat: str,
+    text: str,
+    idents: set[str] | None = None,
+    anchor_ok: bool = False,
+    top: str | None = None,
+    modules: dict[str, ModuleInfo] | None = None,
+) -> bool:
+    if path_glob_in_rtl(kind, pat, text, idents):
+        return True
+    if (
+        kind == "get_cells"
+        and modules is not None
+        and top is not None
+        and ("/" in pat or "*" in pat)
+        and glob_matches_hier_cell_paths(pat, top, modules)
+    ):
+        return True
+    if not anchor_ok:
+        return False
+    return hierarchical_constraint_glob_plausible(pat, text)
+
+
+def check_map_pdc_policy(pdc: Path) -> list[str]:
+    errors: list[str] = []
+    text = pdc.read_text()
+    if "u_flir_uab/" in text:
+        errors.append("map PDC must use instance-agnostic globs (found u_flir_uab/)")
+    if "resetCtrl_systemReset" in text and "-from" in text:
+        errors.append(
+            "map PDC must not use resetCtrl -from/-to pairs (use -to buffers_*/LSR|PD)"
+        )
+    if "ff_inst/LSR" in text or "ff_inst/PD" in text:
+        errors.append("map PDC must use buffers_*/LSR|PD globs, not ff_inst/…")
+    return errors
+
+
 @dataclass
 class ModuleInfo:
     name: str
     ports: set[str] = field(default_factory=set)
     children: dict[str, str] = field(default_factory=dict)  # inst -> child module type
+    idents: set[str] = field(default_factory=set)  # module-local wires/regs/instances
 
 
 def _collect_ports(header_lines: list[str]) -> set[str]:
@@ -158,11 +219,13 @@ def parse_modules(verilog: Path) -> dict[str, ModuleInfo]:
                 header.append(lines[i])
                 i += 1
         info = ModuleInfo(name=mod_name, ports=_collect_ports(header))
+        body_lines: list[str] = []
         while i < len(lines):
             line = lines[i]
             if ENDMODULE_RE.match(line):
                 i += 1
                 break
+            body_lines.append(line)
             inst = INST_LINE.match(line)
             if inst:
                 info.children[inst.group("inst")] = inst.group("mod")
@@ -174,6 +237,7 @@ def parse_modules(verilog: Path) -> dict[str, ModuleInfo]:
                 if pending:
                     info.children["_pending_pll_mod"] = pending.group(1)
             i += 1
+        info.idents = rtl_identifiers("\n".join(body_lines))
         modules[mod_name] = info
     return modules
 
@@ -274,6 +338,69 @@ def collect_instances(
 
     walk(top, "")
     return out
+
+
+CDC_TIMING_CELL_RE = re.compile(
+    r"cdc_(cap|streamPop|flowPop|asyncFifo_spinal_port)",
+    re.I,
+)
+
+
+def _is_cdc_timing_cell_ident(ident: str) -> bool:
+    if CDC_TIMING_CELL_RE.search(ident):
+        return True
+    return ident.startswith("cdc_cap")
+
+
+def collect_hier_cell_paths(top: str, modules: dict[str, ModuleInfo]) -> list[str]:
+    """Instance/cell paths for Synplify-style get_cells -hierarchical globs."""
+    out: list[str] = []
+
+    def walk(mod: str, prefix: str) -> None:
+        info = modules.get(mod)
+        if info is None:
+            return
+        for ident in info.idents:
+            if _is_cdc_timing_cell_ident(ident):
+                out.append(f"{prefix}/{ident}" if prefix else ident)
+        for inst, child in info.children.items():
+            if inst.startswith("_"):
+                continue
+            path = f"{prefix}/{inst}" if prefix else inst
+            walk(child, path)
+
+    walk(top, "")
+    return out
+
+
+def glob_matches_hier_cell_paths(
+    pat: str, top: str, modules: dict[str, ModuleInfo]
+) -> bool:
+    for cell_path in collect_hier_cell_paths(top, modules):
+        if fnmatch.fnmatchcase(cell_path, pat):
+            return True
+        bare = re.sub(r"\[\d+\]", "", cell_path)
+        if bare != cell_path and fnmatch.fnmatchcase(bare, pat):
+            return True
+    return False
+
+
+def fifo_ram_glob_covers_instance(
+    inst_path: str, to_pins: list[str], top: str, modules: dict[str, ModuleInfo]
+) -> bool:
+    cells = collect_hier_cell_paths(top, modules)
+    for p in to_pins:
+        if "cdc_asyncFifo_spinal_port" not in p:
+            continue
+        for cp in cells:
+            if not cp.startswith(inst_path + "/"):
+                continue
+            if fnmatch.fnmatchcase(cp, p):
+                return True
+            bare = re.sub(r"\[\d+\]", "", cp)
+            if fnmatch.fnmatchcase(bare, p):
+                return True
+    return False
 
 
 def extract_through_net_patterns(sdc: Path) -> list[str]:
@@ -395,13 +522,20 @@ def check_cdc_leaf_cell_globs(
         return any(substr in i for i in idents) or substr in verilog_text
 
     def covered(substr: str) -> bool:
-        return any(
-            substr in p and synplify_glob_hits_rtl(p, verilog_text, idents)
-            for p in to_pins
-        )
+        for p in to_pins:
+            if substr not in p:
+                continue
+            if synplify_glob_hits_rtl(p, verilog_text, idents):
+                return True
+            if glob_matches_hier_cell_paths(p, top, modules):
+                return True
+        return False
 
     stream_cc = collect_instances(top, modules, ("StreamCCByToggle",))
-    if stream_cc and hits("popArea_stream_rData"):
+    if stream_cc and hits("cdc_streamPop"):
+        if not covered("cdc_streamPop"):
+            errors.append("missing get_cells TIG for cdc_streamPop*")
+    elif stream_cc and hits("popArea_stream_rData"):
         if not any("popArea_stream_rData" in p for p in to_pins):
             errors.append("missing get_cells TIG for popArea_stream_rData*")
         elif not covered("popArea_stream_rData"):
@@ -412,7 +546,10 @@ def check_cdc_leaf_cell_globs(
     flow_cc = collect_instances(
         top, modules, ("FlowCCByToggle", "FlowCCUnsafeByToggle")
     )
-    if flow_cc and hits("flow_m2sPipe"):
+    if flow_cc and hits("cdc_flowPop"):
+        if not covered("cdc_flowPop"):
+            errors.append("missing get_cells TIG for cdc_flowPop*")
+    elif flow_cc and hits("flow_m2sPipe"):
         if not any("flow_m2sPipe" in p for p in to_pins):
             errors.append("missing get_cells TIG for flow_m2sPipe*")
         elif not covered("flow_m2sPipe"):
@@ -421,16 +558,19 @@ def check_cdc_leaf_cell_globs(
                 "(use *flow_m2sPipe*, not */flow_m2sPipe* — leaf is "
                 "outputArea_flow_m2sPipe_*)"
             )
-        # Catch the known bad form even if another glob also matches.
-        for p in to_pins:
-            if p.startswith("*/flow_m2sPipe"):
-                errors.append(
-                    f"bad FlowCC cell glob {p}: Synplify */prefix requires "
-                    "leaf to start with flow_m2sPipe (actual: "
-                    "outputArea_flow_m2sPipe_*); use *flow_m2sPipe*"
-                )
+    # Catch the known bad form even if another glob also matches.
+    for p in to_pins:
+        if p.startswith("*/flow_m2sPipe"):
+            errors.append(
+                f"bad FlowCC cell glob {p}: Synplify */prefix requires "
+                "leaf to start with flow_m2sPipe (actual: "
+                "outputArea_flow_m2sPipe_*); use *flow_m2sPipe*"
+            )
 
-    if collect_instances(top, modules, ("BufferCC",)) and hits("buffers_0"):
+    if collect_instances(top, modules, ("BufferCC",)) and hits("cdc_cap"):
+        if not covered("cdc_cap"):
+            errors.append("missing get_cells TIG for cdc_cap*")
+    elif collect_instances(top, modules, ("BufferCC",)) and hits("buffers_0"):
         if not any("buffers_0" in p for p in to_pins):
             errors.append("missing get_cells TIG for buffers_0*")
         elif not covered("buffers_0"):
@@ -445,34 +585,72 @@ def check_cdc_false_paths(
     patterns = extract_through_net_patterns(sdc)
     to_pins = extract_to_pin_patterns(sdc)
     errors: list[str] = []
+    def cell_glob_covers(path: str, mod: str) -> bool:
+        # Capture-flop globs. One pattern covers every renamed instance.
+        if mod.startswith("BufferCC"):
+            return any(
+                "cdc_cap" in p
+                and "cdc_BufferCC" in p
+                and glob_matches_hier_cell_paths(p, top, modules)
+                for p in to_pins
+            )
+        if mod.startswith("StreamCC"):
+            return any("cdc_streamPop" in p for p in to_pins)
+        if "FlowCC" in mod:
+            return any(
+                "cdc_flowPop" in p
+                and glob_matches_hier_cell_paths(p, top, modules)
+                for p in to_pins
+            )
+        return False
+
     cdc = collect_instances(top, modules, CDC_WALK_PREFIXES)
     for path, mod in cdc:
-        if not through_covers(path, patterns):
-            errors.append(f"missing false path for {mod} {path}")
+        if through_covers(path, patterns) or cell_glob_covers(path, mod):
+            continue
+        errors.append(f"missing false path for {mod} {path}")
     for path, mod in collect_instances(top, modules, FIFO_CC_PREFIXES):
         if through_covers(path, patterns):
             errors.append(
                 f"whole StreamFifoCC TIG (use nested BufferCC *cdc_* and "
-                f"get_cells */ram_spinal_port1*) {mod} {path}"
+                f"get_cells *cdc_asyncFifo_spinal_port*) {mod} {path}"
             )
     fifo_inst = collect_instances(top, modules, FIFO_CC_PREFIXES)
     if fifo_inst:
-        if not any("ram_spinal_port1" in p for p in to_pins):
-            errors.append("missing StreamFifoCC RAM false_path ram_spinal_port1")
-        elif any(p.startswith("*ram_spinal") and not p.startswith("*/ram_spinal") for p in to_pins):
+        has_async = any("cdc_asyncFifo_spinal_port" in p for p in to_pins)
+        has_ram = any("ram_spinal_port1" in p for p in to_pins)
+        if not has_async and not has_ram:
             errors.append(
-                "StreamFifoCC RAM TIG must be */ram_spinal_port1* "
-                "(bare *ram_spinal_port1* also hits same-clock logic_ram_*)"
+                "missing StreamFifoCC RAM false_path "
+                "cdc_asyncFifo_spinal_port*"
             )
-        elif not any(
-            "*/ram_spinal_port1" in p or p.endswith("ram_spinal_port1*")
-            for p in to_pins
-            if "ram_spinal_port1" in p
-        ):
-            errors.append(
-                "StreamFifoCC RAM TIG must be get_cells */ram_spinal_port1* "
-                "(get_pins …ff_inst/DF is Synplify-escaped to \\.ff_inst)"
-            )
+        elif has_async:
+            for inst_path, mod in fifo_inst:
+                if not fifo_ram_glob_covers_instance(
+                    inst_path, to_pins, top, modules
+                ):
+                    errors.append(
+                        f"no FIFO RAM get_cells glob covers instance "
+                        f"{inst_path} ({mod})"
+                    )
+        elif has_ram and not has_async:
+            if any(
+                p.startswith("*ram_spinal") and not p.startswith("*/ram_spinal")
+                for p in to_pins
+            ):
+                errors.append(
+                    "StreamFifoCC RAM TIG must be */ram_spinal_port1* "
+                    "(bare *ram_spinal_port1* also hits same-clock logic_ram_*)"
+                )
+            elif not any(
+                "*/ram_spinal_port1" in p or p.endswith("ram_spinal_port1*")
+                for p in to_pins
+                if "ram_spinal_port1" in p
+            ):
+                errors.append(
+                    "StreamFifoCC RAM TIG must be get_cells */ram_spinal_port1* "
+                    "(get_pins …ff_inst/DF is Synplify-escaped to \\.ff_inst)"
+                )
     for path, mod in collect_instances(top, modules, PULSE_CC_PREFIXES):
         if through_covers(path, patterns):
             errors.append(f"PulseCCByToggle parent TIG (same-clock toggle) {mod} {path}")
@@ -513,11 +691,70 @@ def check_cdc_false_paths(
     return errors
 
 
+def validate_constraint_file(
+    top: str,
+    modules: dict[str, ModuleInfo],
+    verilog_text: str,
+    idents: set[str],
+    constraint: Path,
+    *,
+    anchor_globs: bool,
+    run_cdc: bool,
+    label: str,
+) -> tuple[int, list[str]]:
+    """Return (exit_code, policy_errors). exit_code 0 = paths ok."""
+    missing: list[tuple[str, str, int]] = []
+    glob_miss: list[tuple[str, str, int]] = []
+    for kind, path, lineno in extract_paths(constraint):
+        if path == "clk":
+            continue
+        if "*" in path or "?" in path:
+            if not constraint_glob_in_rtl(
+                kind,
+                path,
+                verilog_text,
+                idents,
+                anchor_ok=anchor_globs,
+                top=top,
+                modules=modules,
+            ):
+                glob_miss.append((kind, path, lineno))
+            continue
+        if not resolve_path(top, path, modules):
+            missing.append((kind, path, lineno))
+
+    if missing or glob_miss:
+        print(
+            f"Unresolved paths in {top} from {constraint.name}{label}:",
+            file=sys.stderr,
+        )
+        for kind, path, lineno in sorted(set(missing)):
+            print(f"  [{kind}] {path} ({constraint}:{lineno})", file=sys.stderr)
+        for kind, path, lineno in sorted(set(glob_miss)):
+            print(f"  [{kind}] glob {path} ({constraint}:{lineno})", file=sys.stderr)
+        return 1, []
+
+    if not run_cdc:
+        return 0, []
+
+    cdc_errs = check_cdc_false_paths(top, modules, constraint)
+    leaf_errs = check_cdc_leaf_cell_globs(top, modules, constraint, verilog_text)
+    dead_errs = check_dead_through_globs(constraint)
+    usb_errs = check_usb23_hold_pins(verilog_text, constraint)
+    return 0, cdc_errs + leaf_errs + dead_errs + usb_errs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--top", required=True)
     ap.add_argument("--verilog", type=Path, required=True)
     ap.add_argument("--sdc", type=Path, required=True)
+    ap.add_argument(
+        "--map-pdc",
+        type=Path,
+        default=None,
+        help="Optional Map/PAR .pdc (anchor globs + policy; no CDC coverage)",
+    )
     ap.add_argument(
         "--label",
         default="",
@@ -531,49 +768,55 @@ def main() -> int:
         print(f"Top module {args.top} not found{label}", file=sys.stderr)
         return 2
 
-    missing: list[tuple[str, str, int]] = []
-    glob_miss: list[tuple[str, str, int]] = []
     verilog_text = args.verilog.read_text()
     idents = rtl_identifiers(verilog_text)
-    for kind, path, lineno in extract_paths(args.sdc):
-        if path == "clk":
-            continue
-        if "*" in path or "?" in path:
-            if not path_glob_in_rtl(kind, path, verilog_text, idents):
-                glob_miss.append((kind, path, lineno))
-            continue
-        if not resolve_path(args.top, path, modules):
-            missing.append((kind, path, lineno))
 
-    if missing or glob_miss:
-        print(
-            f"Unresolved paths in {args.top} from {args.verilog}{label}:",
-            file=sys.stderr,
+    path_rc, cdc_errs = validate_constraint_file(
+        args.top,
+        modules,
+        verilog_text,
+        idents,
+        args.sdc,
+        anchor_globs=False,
+        run_cdc=True,
+        label=label,
+    )
+    if path_rc != 0:
+        return path_rc
+
+    if args.map_pdc is not None:
+        policy = check_map_pdc_policy(args.map_pdc)
+        if policy:
+            print(f"Map PDC policy errors in {args.top}{label}:", file=sys.stderr)
+            for e in policy:
+                print(f"  {e}", file=sys.stderr)
+            return 1
+        map_rc, _ = validate_constraint_file(
+            args.top,
+            modules,
+            verilog_text,
+            idents,
+            args.map_pdc,
+            anchor_globs=True,
+            run_cdc=False,
+            label=label,
         )
-        for kind, path, lineno in sorted(set(missing)):
-            print(f"  [{kind}] {path} ({args.sdc}:{lineno})", file=sys.stderr)
-        for kind, path, lineno in sorted(set(glob_miss)):
-            print(f"  [{kind}] glob {path} ({args.sdc}:{lineno})", file=sys.stderr)
-        return 1
+        if map_rc != 0:
+            return map_rc
 
-    cdc_errs = check_cdc_false_paths(args.top, modules, args.sdc)
-    leaf_errs = check_cdc_leaf_cell_globs(args.top, modules, args.sdc, verilog_text)
-    dead_errs = check_dead_through_globs(args.sdc)
-    usb_errs = check_usb23_hold_pins(verilog_text, args.sdc)
-    all_errs = cdc_errs + leaf_errs + dead_errs + usb_errs
-    if all_errs:
+    if cdc_errs:
         print(
             f"CDC/USB false-path coverage errors in {args.top}{label}:",
             file=sys.stderr,
         )
-        for e in all_errs:
+        for e in cdc_errs:
             print(f"  {e}", file=sys.stderr)
         return 1
 
-    print(
-        f"All {len(extract_paths(args.sdc))} SDC references resolve in "
-        f"{args.top}{label}"
-    )
+    n_paths = len(extract_paths(args.sdc))
+    if args.map_pdc is not None:
+        n_paths += len(extract_paths(args.map_pdc))
+    print(f"All {n_paths} constraint references resolve in {args.top}{label}")
     return 0
 
 

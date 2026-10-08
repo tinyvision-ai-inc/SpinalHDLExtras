@@ -9,7 +9,10 @@ from pathlib import Path
 
 from validate_sdc_paths import (
     check_cdc_leaf_cell_globs,
+    check_map_pdc_policy,
+    constraint_glob_in_rtl,
     get_pins_glob_in_rtl,
+    hierarchical_constraint_glob_plausible,
     parse_modules,
     synplify_glob_hits_rtl,
     synplify_glob_matches_ident,
@@ -107,6 +110,30 @@ endmodule
             modules = parse_modules(v)
             errs = check_cdc_leaf_cell_globs("top", modules, sdc, FLOW_V)
             self.assertEqual(errs, [])
+
+    def test_map_pdc_anchor_globs_without_lsr_in_rtl(self) -> None:
+        rtl = """
+module top;
+  BufferCC_9 cdc_BufferCC_spinex_som_resetCtrl_systemReset_asyncAssertSyncDeassert_buffercc ();
+  reg buffers_0;
+  reg buffers_1;
+endmodule
+"""
+        pat = "*asyncAssertSyncDeassert*buffers_*/LSR"
+        self.assertFalse(token_in_rtl(pat, rtl))
+        self.assertTrue(hierarchical_constraint_glob_plausible(pat, rtl))
+        self.assertTrue(
+            constraint_glob_in_rtl("get_pins", pat, rtl, anchor_ok=True)
+        )
+
+    def test_map_pdc_rejects_u_flir_uab(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            pdc = Path(td) / "m.pdc"
+            pdc.write_text(
+                "set_false_path -to [get_pins {u_flir_uab/*cdc_BufferCC*buffers_*/LSR}]\n"
+            )
+            errs = check_map_pdc_policy(pdc)
+            self.assertTrue(any("u_flir_uab" in e for e in errs))
 
     def test_get_pins_accepts_hip_aliases(self) -> None:
         rtl = """

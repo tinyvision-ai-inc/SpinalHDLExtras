@@ -31,7 +31,14 @@ object IPX {
     }
 
     val sdc_file = s"${report.toplevelName}.sdc"
-    Constraints.write_file(report, s"${report.globalData.config.targetDirectory}/${sdc_file}")
+    val targetDir = report.globalData.config.targetDirectory
+    Constraints.write_file(report, s"$targetDir/$sdc_file")
+
+    val map_pdc = s"${report.toplevelName}_map_constraints.pdc"
+    Constraints.write_map_pdc_file(report, s"$targetDir/$map_pdc")
+    // Legacy chip-top stub; CDC is IP SDC + board merge (not a second POSTSYN SDC).
+    new File(s"$targetDir/${report.toplevelName}_chip_constraints.sdc").delete()
+    new File(s"$targetDir/${report.toplevelName}_map_constraints.tcl").delete()
 
     file.write(
       s"""

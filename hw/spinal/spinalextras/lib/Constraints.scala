@@ -287,53 +287,46 @@ class Constraints {
     // in those wrappers still get marked.
     val usedCdcGlobs = scala.collection.mutable.LinkedHashSet[String]()
     var hasFifoCcRam = false
-    var hasStreamCcPop = false
-    var hasFlowCcPop = false
     Constraints.walkCdcComponents(report.toplevel) {
       case c if Constraints.isCdcThroughLeaf(c) =>
         // Names/KeepName already applied in PhaseCdcAnchor; refresh for SDC.
         Constraints.markCdcAnchor(c)
         usedCdcGlobs ++= Constraints.cdcGlobsForNamed(c)
-        c match {
-          case _: StreamCCByToggle[_] => hasStreamCcPop = true
-          case _: FlowCCByToggle[_] | _: FlowCCUnsafeByToggle[_] => hasFlowCcPop = true
-          case _ =>
-        }
       case c: StreamFifoCC[_] =>
         Constraints.markFifoRam(c)
         hasFifoCcRam = true
       case _ =>
     }
+    val (streamPop, flowPop, _) = Constraints.renameTimingAnchors(report.toplevel)
 
-    for (g <- usedCdcGlobs) {
-      file.println(s"set_false_path -through [get_nets -hierarchical {$g}]")
-    }
-    // BufferCC dest flops (buffers_0 + buffers_1). Synplify escapes '.' in
-    // get_pins (…\.ff_inst…); get_cells is what expands in TWR.
+    // No -through *cdc_BufferCC* / *ccToggle*: that also false-paths the
+    // synchronizer output in the receiving clock. Capture is -to cells below.
+    // BufferCC dest flops. Synplify escapes '.' in get_pins; get_cells expands in TWR.
     if (usedCdcGlobs.contains("*cdc_BufferCC*")) {
       for (g <- Constraints.bufferCcDestFlopCellGlobs) {
         file.println(s"set_false_path -to [get_cells -hierarchical {$g}]")
       }
     }
-    // StreamCCByToggle pop-side payload regs (push clk → pop m2sPipe).
-    if (hasStreamCcPop) {
+    // StreamCCByToggle pop payload (push clk → cdc_streamPop).
+    if (streamPop) {
       for (g <- Constraints.streamCcPopDataCellGlobs) {
         file.println(s"set_false_path -to [get_cells -hierarchical {$g}]")
       }
     }
-    // FlowCC* output m2sPipe payload (inputArea.data → flow_m2sPipe).
-    if (hasFlowCcPop) {
+    // FlowCC payload captured by the parent toStream pipe (cdc_flowPop).
+    if (flowPop) {
       for (g <- Constraints.flowCcPopDataCellGlobs) {
         file.println(s"set_false_path -to [get_cells -hierarchical {$g}]")
       }
     }
-    // Async FIFO inferred-RAM (push addr → pop ram_spinal_port1).
-    // */ram_spinal_port1* excludes same-clock logic_ram_spinal_port1.
+    // Async FIFO pop port (push clock → cdc_asyncFifo_spinal_port1).
     if (hasFifoCcRam) {
       for (g <- Constraints.fifoRamCellGlobs) {
         file.println(s"set_false_path -to [get_cells -hierarchical {$g}]")
       }
     }
+    // CPOL/CPHA live in the board map SDC. CPE rewrites an IP get_ports
+    // spiflash_clk into a pin that is not in the IP netlist.
 
     // USB23 HIP: AXI/LMMI inputs sampled inside (hold). INTERRUPT false-path
     // lives in the board Soft-DPHY SDC (-hierarchical); IP emit becomes
@@ -357,6 +350,20 @@ class Constraints {
     file.close()
   }
 
+  /** Lattice Map/PAR physical constraints (board RDF Physical Constraints File). */
+  def write_map_pdc_file[T <: Component](report: SpinalReport[T], path: String): Unit = {
+    val (hasAasd, hasFifoCc, hasBufferCc) = Constraints.mapPdcAnchorPresence(report.toplevel)
+    val lines = Constraints.mapPdcConstraintLines(hasAasd, hasFifoCc, hasBufferCc)
+    val file = new PrintWriter(path)
+    file.println(s"# Generated from Constraints.scala — Map/PAR PDC (${report.toplevelName}).")
+    file.println(
+      "# Instance-agnostic: Spinal KeepName anchors (asyncAssertSyncDeassert, streamFifoCC, cdc_BufferCC)."
+    )
+    file.println("# Add to board RDF as Physical Constraints File (Map/PAR stage).")
+    file.println()
+    lines.foreach(file.println)
+    file.close()
+  }
 
 }
 
@@ -449,25 +456,81 @@ object Constraints {
     keep_chain(c)
     Obfuscater.KeepName(c)
     c.setName(stableCdcName(c))
-  }
-
-  /** Keep StreamFifoCC Mem name `ram` so ram_spinal_port1 survives obfuscate. */
-  def markFifoRam(c: StreamFifoCC[_]): Unit = {
-    c.ram.addTag(Obfuscater.KeepName)
-    c.ram.setName("ram")
+    c match {
+      case b: BufferCC[_] if b.buffers.nonEmpty =>
+        // Capture stage only. buffers(1) is the same-clock synchronizer
+        // stage and stays timed.
+        val cap = b.buffers(0)
+        cap.setName("cdc_cap")
+        cap.addTag(Obfuscater.KeepName)
+      case _ =>
+    }
   }
 
   /**
-   * KeepName Stream/Flow CDC pipe payload regs so obfuscate does not rename
-   * them out from under the popArea_stream_rData and flow_m2sPipe get_cells
-   * TIGs. Stream.m2sPipe uses rData; Flow.m2sPipe(holdPayload) uses a Reg
-   * named m2sPipe via setCompositeName.
+   * Async-FIFO memory. Name is cdc_asyncFifo so the pop port is
+   * cdc_asyncFifo_spinal_port1, which does not match a same-clock
+   * logic_ram_spinal_port1.
    */
+  def markFifoRam(c: StreamFifoCC[_]): Unit = {
+    c.ram.addTag(Obfuscater.KeepName)
+    c.ram.setName("cdc_asyncFifo")
+  }
+
+  /**
+   * Rename CDC payload regs to a stable KeepName so one glob covers the
+   * class. cdc_streamPop: StreamCC pop m2sPipe. cdc_flowPop: FlowCC output
+   * sampled by the parent toStream pipe (that pipe is not inside FlowCC).
+   * static_spi_cp*: SPI CPOL/CPHA, quasi-static bits that XOR into sclk.
+   */
+  def renameTimingAnchors(top: Component): (Boolean, Boolean, Boolean) = {
+    var streamPop = false
+    var flowPop = false
+    var spiMode = false
+    top.walkComponents { c =>
+      c.dslBody.walkDeclarations {
+        case bt: BaseType =>
+          val n = Option(bt.getName()).getOrElse("")
+          if (n.contains("popArea_stream_rData")) {
+            bt.setName(n.replace("popArea_stream_rData", "cdc_streamPop"))
+            bt.addTag(Obfuscater.KeepName)
+            streamPop = true
+          } else if (n.contains("cdc_streamPop")) {
+            bt.addTag(Obfuscater.KeepName)
+            streamPop = true
+          }
+          if (n.contains("toStream_rData") && n.contains("FlowCC")) {
+            // Leaf must start with cdc_flowPop. Synplify */cdc_flowPop* does
+            // not match a leaf that only contains the token in the middle.
+            val tail = n.substring(n.indexOf("toStream_rData") + "toStream_rData".length)
+            bt.setName(s"cdc_flowPop$tail")
+            bt.addTag(Obfuscater.KeepName)
+            flowPop = true
+          } else if (n.contains("cdc_flowPop")) {
+            bt.addTag(Obfuscater.KeepName)
+            flowPop = true
+          }
+          if (n == "ctrl_io_config_kind_driver_cpol" || n == "static_spi_cpol") {
+            if (n != "static_spi_cpol") bt.setName("static_spi_cpol")
+            bt.addTag(Obfuscater.KeepName)
+            spiMode = true
+          }
+          if (n == "ctrl_io_config_kind_driver_cpha" || n == "static_spi_cpha") {
+            if (n != "static_spi_cpha") bt.setName("static_spi_cpha")
+            bt.addTag(Obfuscater.KeepName)
+            spiMode = true
+          }
+        case _ =>
+      }
+    }
+    (streamPop, flowPop, spiMode)
+  }
+
   def markCrossClockPipeData(c: Component): Unit = {
     c.dslBody.walkDeclarations {
       case bt: BaseType =>
         val n = bt.getName()
-        if (n != null && (n.contains("_rData") || n.contains("_m2sPipe"))) {
+        if (n != null && (n.contains("cdc_streamPop") || n.contains("_rData") || n.contains("_m2sPipe"))) {
           bt.addTag(Obfuscater.KeepName)
         }
       case _ =>
@@ -480,7 +543,9 @@ object Constraints {
   val cdcNetGlobs = Seq(
     "*cdc_BufferCC*",
     "*cdc_*ccToggle*",
-    "*cdc_*FlowCC*"
+    "*cdc_FlowCC*",
+    "*FlowCCUnsafeByToggle*",
+    "*FlowCCByToggle*"
   )
 
   // USB23 HIP INTERRUPT async out: board Soft-DPHY SDC only (keeps
@@ -507,20 +572,64 @@ object Constraints {
   )
 
   // Synplify: get_pins *….ff_inst/DF* is rewritten to *…\.ff_inst* and never
-  // matches. get_cells works (TWR 2026-09-03). Leading */ excludes logic_ram_*.
-  val fifoRamCellGlobs = Seq("*/ram_spinal_port1*")
-  // BufferCC dest-side: buffers_0 is first sample (HIP INTERRUPT end);
-  // buffers_1 includes async-reset LSR (asyncAssertSyncDeassert) not covered
-  // by -through buffers_1/Q alone.
-  val bufferCcDestFlopCellGlobs = Seq("*/buffers_0*", "*/buffers_1*")
-  // StreamCCByToggle pop m2sPipe holds push-clock payload; -through on the
-  // ccToggle nets misses paths that *end* at these regs (TWR 2026-09-03).
-  val streamCcPopDataCellGlobs = Seq("*/popArea_stream_rData*")
-  // FlowCC* output m2sPipe (holdPayload Reg via setCompositeName →
-  // outputArea_flow_m2sPipe_*). Do not use */flow_m2sPipe*: Synplify wants
-  // the leaf to start right after /, so that glob never matches and the
-  // push→pop payload CDC stays timed (MT447).
-  val flowCcPopDataCellGlobs = Seq("*flow_m2sPipe*")
+  // matches. get_cells works (TWR 2026-09-03).
+  // cdc_asyncFifo_spinal_port1 is the StreamFifoCC pop port RAM output flop.
+  // Synplify CPE: u_flir_uab/*_queue*/*cdc_asyncFifo_spinal_port* expands; *streamFifoCC_*/*… is empty
+  // (instance names are io_*_queue, not streamFifoCC_* in the flattened cell path).
+  // Synplify CPE (flir_uab): dual-anchor when parent+leaf share one path segment;
+  // extra */ hop when spinex_som sits between u_flir_uab and apb3CC_1 / *_queue*.
+  val fifoRamCellGlobs = Seq(
+    "*_queue*/*cdc_asyncFifo_spinal_port*",
+    "*/*_queue*/*cdc_asyncFifo_spinal_port*",
+    "*/streamFifoCC_*/*cdc_asyncFifo_spinal_port*",
+    "*/bytes_to_pixels/fifo/*cdc_asyncFifo_spinal_port*"
+  )
+  val bufferCcDestFlopCellGlobs = Seq("*cdc_BufferCC*/cdc_cap*")
+  val streamCcPopDataCellGlobs = Seq("*/cdc_streamPop*")
+  val flowCcPopDataCellGlobs = Seq("*/*/cdc_flowPop*")
+
+  /** Which Map/PAR LSR/PD globs apply to this top (emit only non-empty sets). */
+  def mapPdcAnchorPresence(top: Component): (Boolean, Boolean, Boolean) = {
+    var hasAasd = false
+    var hasFifoCc = false
+    var hasBufferCc = false
+    top.walkComponents { c =>
+      val n = Option(c.getName()).getOrElse("")
+      if (n.contains("asyncAssertSyncDeassert")) {
+        hasAasd = true
+      }
+      c match {
+        case _: StreamFifoCC[_] => hasFifoCc = true
+        case _: BufferCC[_]     => hasBufferCc = true
+        case _                  =>
+      }
+    }
+    (hasAasd, hasFifoCc, hasBufferCc)
+  }
+
+  def mapPdcConstraintLines(
+      hasAsyncAssertSyncDeassert: Boolean,
+      hasStreamFifoCc: Boolean,
+      hasBufferCc: Boolean
+  ): Seq[String] = {
+    val out = scala.collection.mutable.ArrayBuffer[String]()
+    if (hasAsyncAssertSyncDeassert) {
+      out += "# asyncAssertSyncDeassert BufferCC async-reset (LSR/PD)."
+      out += "set_false_path -to [get_pins -hierarchical {*asyncAssertSyncDeassert*buffers_*/LSR}]"
+      out += "set_false_path -to [get_pins -hierarchical {*asyncAssertSyncDeassert*buffers_*/PD}]"
+    }
+    if (hasStreamFifoCc) {
+      out += "# StreamFifoCC nested BufferCC async-reset LSR (map/PAR: *_queue* or streamFifoCC_* parent)."
+      out += "set_false_path -to [get_pins -hierarchical {*_queue*/*cdc_BufferCC*buffers_*/LSR}]"
+      out += "set_false_path -to [get_pins -hierarchical {*streamFifoCC_*/*cdc_BufferCC*buffers_*/LSR}]"
+    }
+    if (hasBufferCc) {
+      out += "# BufferCC async-reset pins (LSR/PD)."
+      out += "set_false_path -to [get_pins -hierarchical {*cdc_BufferCC*buffers_*/LSR}]"
+      out += "set_false_path -to [get_pins -hierarchical {*cdc_BufferCC*buffers_*/PD}]"
+    }
+    out.toSeq
+  }
 
   def addAttributeIfNeeded(d : Component, n : String, v : String): Unit = {
     if (!d.getTagsOf[Attribute].exists(a => a.getName == n)) {
@@ -553,6 +662,7 @@ object Constraints {
       KeepAttribute(fp)
       keep_chain(fp.component)
     }
+    renameTimingAnchors(d)
   }
 
   /**
@@ -600,6 +710,11 @@ object Constraints {
   def write_file[T <: Component](report: SpinalReport[T], path : String): Unit = {
     check()
     constraints.write_file(report, path)
+  }
+
+  def write_map_pdc_file[T <: Component](report: SpinalReport[T], path: String): Unit = {
+    check()
+    constraints.write_map_pdc_file(report, path)
   }
   def add_verbatim(s: => String) : Unit = {
     check()

@@ -299,6 +299,19 @@ def main() -> int:
             ram_path.unlink()
 
     bundled_names = sorted(set(bundled_names), key=lambda n: package_file_order(n, args.top))
+    # Map/PAR side files: ship .pdc only (not legacy chip SDC or duplicate Tcl).
+    bundled_names = [
+        n
+        for n in bundled_names
+        if not n.endswith("_map_constraints.tcl")
+        and not n.endswith("_chip_constraints.sdc")
+    ]
+    chip_legacy = args.output / f"{args.top}_chip_constraints.sdc"
+    if chip_legacy.is_file():
+        chip_legacy.unlink()
+    map_tcl = args.output / f"{args.top}_map_constraints.tcl"
+    if map_tcl.is_file():
+        map_tcl.unlink()
     package_files = [ipx_file_entry(name, args.top) for name in bundled_names]
 
     write_ipx(
