@@ -705,6 +705,14 @@ object PLLConfig {
     s"0b" + x.toBinaryString.reverse.padTo(places, '0').reverse
   }
 
+  // FPGA-TN-02095 §14.7: fractional feedback is N + F/4096, F a 12-bit word.
+  // Appendix C stores that fraction in 15-bit SSC_F_CODE. Radiant’s PLL IP
+  // writes F in the top 12 bits (F << 3), which is F/4096 when read as /2^15.
+  val clkfb_frac_denom = 4096
+  val ssc_f_code_bits = 15
+  val ssc_f_code_shift = ssc_f_code_bits - Integer.numberOfTrailingZeros(clkfb_frac_denom)
+  require((clkfb_frac_denom << ssc_f_code_shift) == (1 << ssc_f_code_bits))
+
   val nclkouts_max        = 5
   val clki_div_range      = Array.range( 1, 128+1)
 
@@ -973,7 +981,7 @@ object PLLConfig {
     val ref_clk = clkConfig.CLK_REF
     val outputClocks = clkConfig.OUTPUTS
 
-    val params = calcOptimalParams(inputClock.freq.toDouble, fb_div + fb_div_frac / 4096.0, clki_div).get
+    val params = calcOptimalParams(inputClock.freq.toDouble, fb_div + fb_div_frac.toDouble / clkfb_frac_denom, clki_div).get
     val IPP_SEL_LUT = Map(1 -> 1, 2 -> 3, 3 -> 7, 4 -> 15)
 
     val pp_map = Map(
@@ -1053,21 +1061,37 @@ object PLLConfig {
       OUTPUT_CLKS = outputClocks,
 
       SSC_N_CODE        = if (has_spread_spectrum || has_frac_n) to_bin_string(fb_div, 9) else "0b000000000",
-      SSC_F_CODE        = if (has_spread_spectrum || has_frac_n) to_bin_string(fb_div_frac, 15) else "0b000000000000000",
+      SSC_F_CODE        = if (has_spread_spectrum || has_frac_n) to_bin_string(fb_div_frac << ssc_f_code_shift, ssc_f_code_bits) else "0b000000000000000",
 
     )
   }
 
+  /**
+   * Request window widened by the reference tolerance, then clipped to
+   * datasheet fOUT (6.25–800 MHz). Empty when the request cannot be met.
+   */
+  def outputWindow(spec: ClockSpecification, inputTolerance: Double): Option[(Double, Double)] = {
+    val freq = spec.freq.toDouble
+    val slack = freq * inputTolerance
+    val lo = (spec.LowestFrequency.toDouble - slack).max((6.25 MHz).toDouble)
+    val hi = (spec.HighestFrequency.toDouble + slack).min((800 MHz).toDouble)
+    if (lo <= hi) Some((lo, hi)) else None
+  }
+
   def create_clock_config(vco_freq : Rational, vco_tolerance : Double, spec : ClockSpecification): (Double, PLLOutputClockConfig, Boolean) = {
-    val lowest_freq = spec.LowestFrequency.max(6.25 MHz)
-    val highest_freq = spec.HighestFrequency.min(800 MHz)
-
     val spec_freq_d = spec.freq.toDouble
-    val spec_tol_d = spec.tolerance.toDouble
-
-    val range_start = (vco_freq/highest_freq.toInt).toDouble.floor.toInt.min(128)
-    val range_end = (vco_freq/lowest_freq.toInt).toDouble.ceil.toInt.min(128)
-    val div_range = Array.range(range_start, range_end + 1)
+    val window = outputWindow(spec, vco_tolerance)
+    val edge = Math.max(spec_freq_d, 1.0) * 1e-9
+    // Search only dividers that can land in the clipped window. An inverted
+    // span (0 Hz, or 900 MHz ±10% which is 810–990) must not divide by zero
+    // or treat O=1 as a legal 900 MHz output.
+    val div_range = window match {
+      case None => Array.empty[Int]
+      case Some((lo, hi)) =>
+        val range_start = Math.floor(vco_freq.toDouble / hi).toInt.min(128).max(1)
+        val range_end = Math.ceil(vco_freq.toDouble / lo).toInt.min(128).max(1)
+        if (range_start <= range_end) Array.range(range_start, range_end + 1) else Array.empty[Int]
+    }
 
     val validOptions = div_range.map(d => {
         val phasef = ((1 + spec.phaseOffset / 360) * d)
@@ -1075,8 +1099,9 @@ object PLLConfig {
         val actual_phase = ((phase.toDouble / d) - 1) * 360
 
         val clk_freq = vco_freq / d
+        val freq_err = clk_freq.toDouble - spec.freq.toDouble
         (
-          (clk_freq.toDouble - spec.freq.toInt),
+          freq_err,
           (actual_phase - spec.phaseOffset).abs,
           PLLOutputClockConfig(
             ENABLE = true,
@@ -1084,19 +1109,19 @@ object PLLConfig {
             DEL = phase - 1,
             ACTUAL_FREQ = clk_freq.toDouble,
             ACTUAL_PHASE = actual_phase
-          )
+          ),
+          window.exists { case (lo, hi) =>
+            clk_freq.toDouble >= lo - edge && clk_freq.toDouble <= hi + edge
+          }
         )
       })
-      .map(r => (r._1.abs * 1e-6 + r._2 / 360.0, r._3,
-        {
-          val err = r._1
-          val allowable_error = (spec_freq_d * (spec_tol_d + vco_tolerance))
-          err <= allowable_error
-        }
-        ))
+      .map(r => (r._1.abs * 1e-6 + r._2 / 360.0, r._3, r._4))
       .sortBy(r => r._1.abs)
 
-    validOptions.head
+    if (validOptions.isEmpty)
+      (Double.MaxValue, PLLOutputClockConfig(ENABLE = false, ACTUAL_FREQ = 0), false)
+    else
+      validOptions.find(_._3).getOrElse(validOptions.head)
 //    (validOptions.head._1,
 //      if(validOptions.head._3) Some(validOptions.head._2) else None)
   }
@@ -1104,11 +1129,17 @@ object PLLConfig {
   def valid_fbclks(inputClock : ClockSpecification): Seq[Rational] = {
     val vco_max = 1600000000
     val vco_min = 800000000
+    // Integer PFD is 18–500 MHz (CrossLink-NX Table 3.34). The upper bound
+    // is inclusive: M = floor(fREF/18) is still legal. 100 MHz is the
+    // fractional-N PFD cap and is not applied here.
     val max_clki_div = (inputClock.freq / (18 MHz)).toDouble.floor.toInt
-    val min_clki_div = (inputClock.freq / (100 MHz)).toDouble.ceil.toInt
+    val min_clki_div = (inputClock.freq / (500 MHz)).toDouble.ceil.toInt.max(1)
+    val clki_divs =
+      if (max_clki_div >= min_clki_div) Array.range(min_clki_div, max_clki_div + 1)
+      else Array.empty[Int]
 
     (for {
-      clki_div <- Array.range(min_clki_div, max_clki_div);
+      clki_div <- clki_divs;
       clkfb_div <- clkfb_div_range
     } yield Rational((inputClock.freq * clkfb_div).toInt, clki_div))
       .filter(x => x.toDouble <= (800000000) && x.toDouble >= 6250000)
@@ -1135,7 +1166,14 @@ object PLLConfig {
     } yield fbclk * clko_div).filter(x => x.toDouble <= (1600000000) && x.toDouble >= (800000000)).distinct.sortBy[Double](-_.toDouble)
   }
 
-  def valid_frac_vcos(inputClock : ClockSpecification) : Seq[(Rational, Int, Int, Int)] = {
+  // The fractional VCO list depends only on the reference frequency. A sweep
+  // over output clocks would otherwise rebuild it on every call.
+  private val fracVcoCache = mutable.HashMap[Double, Seq[(Rational, Int, Int, Int)]]()
+
+  def valid_frac_vcos(inputClock : ClockSpecification) : Seq[(Rational, Int, Int, Int)] =
+    fracVcoCache.getOrElseUpdate(inputClock.freq.toDouble, computeValidFracVcos(inputClock))
+
+  private def computeValidFracVcos(inputClock : ClockSpecification) : Seq[(Rational, Int, Int, Int)] = {
     val rtn = mutable.HashSet[(Rational, Int, Int, Int)]()
 
     val valid_clki_div = clki_div_range
@@ -1150,8 +1188,8 @@ object PLLConfig {
 
         breakable {
           for (clkfb_div <- clkfb_frac_div_range) {
-            for (clkfb_frac_value <- 0 until 4096) {
-              val vco = phase_clk * Rational(clkfb_frac_value + clkfb_div * 4096, 4096)
+            for (clkfb_frac_value <- 0 until clkfb_frac_denom) {
+              val vco = phase_clk * Rational(clkfb_frac_value + clkfb_div * clkfb_frac_denom, clkfb_frac_denom)
               val vco_hz = (vco.toBigDecimal Hz)
               if (vco_hz > (1600 MHz)) {
                 break
@@ -1181,7 +1219,7 @@ object PLLConfig {
           }
           else if ((phase_detect_freq <= (500 MHz))) {
             val clkfb_div = (clk.ACTUAL_FREQ * clki_div / inputClockFreq_d)
-            if (clk.ACTUAL_PHASE == 0 && clkfb_div.round == clkfb_div && clkfb_div < (128)) {
+            if (clk.ACTUAL_PHASE == 0 && clkfb_div.round == clkfb_div && clkfb_div >= 1 && clkfb_div <= 128) {
               return Some(PLLClockConfig(CLKI_DIV = clki_div, CLKFB_DIV = clkfb_div.toInt))
             }
           }
@@ -1275,6 +1313,15 @@ object PLLConfig {
     var config = Map[String, Any]()
 
     var actualOutputClocks = outputClocks
+    val finHz = inputClock.freq.toDouble
+    if (finHz < (18 MHz).toDouble || finHz > (500 MHz).toDouble)
+      throw new IllegalArgumentException(f"PLL reference ${finHz / 1e6}%.6f MHz outside 18..500 MHz")
+    if (actualOutputClocks.isEmpty)
+      throw new IllegalArgumentException("PLL needs at least one output")
+    if (actualOutputClocks.length > idx_to_name.length)
+      throw new IllegalArgumentException(s"PLL has ${idx_to_name.length} outputs, asked for ${actualOutputClocks.length}")
+    if (actualOutputClocks.forall(spec => outputWindow(spec, inputClock.tolerance).isEmpty))
+      throw new IllegalArgumentException("No requested output is inside 6.25..800 MHz")
 
     // The clock system here works by using the inputClock to establish a VCO between 800 and 1600. Each output clock
     // is tuned according to
@@ -1298,12 +1345,11 @@ object PLLConfig {
     // F_on... are to be optimized
     // N, M, On, R are unknowns
     //
-    // For fractional mode, the PLL works differently
-    // VCO = F_i / N * M
-    // And it seems like the ref clock is internally driven
+    // Fractional mode (FPGA-TN-02095 §14.7): VCO = F_i * (N + F/4096) / M.
+    // F is packed into SSC_F_CODE by ssc_f_code_shift. Integer mode is used
+    // when it can hit every requested output.
 
     var solution = solve_non_fractional(inputClock, actualOutputClocks:_*)
-    solution = None
     if(solution.isEmpty) {
       solution = solve_fractional(inputClock, actualOutputClocks: _*)
     }
