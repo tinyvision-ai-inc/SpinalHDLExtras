@@ -61,7 +61,9 @@ case class WishboneStream(config : WishboneConfig) extends Bundle with IMasterSl
 
   def cmdM2sPipe(): WishboneStream = {
     val ret = cloneOf(this)
-    this.cmd.m2sPipe() >> ret.cmd
+    /* keep: this register is a timing cut. Without it, synthesis can
+     * retime the slave read mux back onto the decoder address. */
+    this.cmd.m2sPipe(keep = true) >> ret.cmd
     this.rsp << ret.rsp
     ret
   }
@@ -162,6 +164,60 @@ object WishboneStream {
   }
 }
 
+/** One slave cycle per master cycle. Stream.m2sPipe reloads while the
+  * master still holds CYC through ACK, so a registered-ACK slave sees
+  * the same access twice. Descriptor post and completion pop then fire
+  * twice and the bulk ring loses a transfer. */
+case class WbSingleIssueCut(config: WishboneConfig) extends Component {
+  val io = new Bundle {
+    val up = slave(Wishbone(config))
+    val down = master(Wishbone(config))
+  }
+
+  val req = io.up.CYC && io.up.STB
+  val busy = RegInit(False)
+  val adr = Reg(io.up.ADR) init 0
+  val we = Reg(Bool()) init False
+  val datMosi = Reg(io.up.DAT_MOSI) init 0
+  val sel = if (config.useSEL) Reg(io.up.SEL) init 0 else null
+  /* keep: this address register is the 75 MHz cut in front of the
+   * UsbEngine read mux. Retiming must not pull that mux back across it. */
+  KeepAttribute(adr, datMosi, we)
+  if (sel != null) KeepAttribute(sel)
+
+  val done = io.down.isRequestAck
+  when(!busy && req) {
+    busy := True
+    adr := io.up.ADR
+    we := io.up.WE
+    datMosi := io.up.DAT_MOSI
+    if (sel != null) sel := io.up.SEL
+  }
+  when(done) {
+    busy := False
+  }
+
+  io.down.CYC := busy
+  io.down.STB := busy
+  io.down.ADR := adr
+  io.down.WE := we
+  io.down.DAT_MOSI := datMosi
+  if (sel != null) io.down.SEL := sel
+  if (config.useLOCK) io.down.LOCK := False
+  if (config.useCTI) io.down.CTI := 0
+  if (config.useBTE) io.down.BTE := 0
+  if (config.useTGA) io.down.TGA := 0
+  if (config.useTGC) io.down.TGC := 0
+  if (config.useTGD) io.down.TGD_MOSI := 0
+
+  io.up.ACK := io.down.ACK && busy
+  io.up.DAT_MISO := io.down.DAT_MISO
+  if (config.useERR) io.up.ERR := io.down.ERR && busy
+  if (config.useRTY) io.up.RTY := False
+  if (config.useSTALL) io.up.STALL := False
+  if (config.useTGD) io.up.TGD_MISO := 0
+}
+
 object WishboneStage {
   def apply(bus : Wishbone): Wishbone = {
     apply(bus, m2s_stage = true, s2m_stage = false)
@@ -176,13 +232,23 @@ object WishboneStage {
     if(!m2s_stage && !s2m_stage)
       return bus
 
+    if (m2s_stage && !s2m_stage) {
+      val cut = WbSingleIssueCut(bus.config)
+      cut.io.up <> bus
+      val out_bus = cut.io.down
+      GlobalLogger(
+        Set("debug-wb"),
+        WishboneBusLogger.flows(bus, out_bus.setName("out_bus"))
+      )
+      return out_bus
+    }
+
     val inConv = Wb2WishboneStream_s2m(bus.config, rspPipe = false)
     inConv.io.bus <> bus
     val staged = (m2s_stage, s2m_stage) match {
       case (true, true) => inConv.io.stream.cmdM2sPipe().cmdS2mPipe().rspPipe()
       case (false, true) => inConv.io.stream.cmdS2mPipe().rspPipe()
-      case (true, false) => inConv.io.stream.cmdM2sPipe()
-      case (false, false) => inConv.io.stream
+      case _ => inConv.io.stream
     }
     val outConv = Wb2WishboneStream_m2s(bus.config)
     outConv.io.stream <> staged
