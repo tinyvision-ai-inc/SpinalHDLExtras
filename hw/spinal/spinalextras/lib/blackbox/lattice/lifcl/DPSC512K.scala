@@ -75,8 +75,10 @@ class DPSC512K_Mem(target_latency : Int = 2, read_write_ports : Int = 2, initial
     Bits(32 bits), (1 << 14), read_write_ports, 0, 0
   )
   /* HIP CSA/CSB is a real timing endpoint. registerPort*Cmd adds a cmd flop and
-   * +1 read latency on that port; default off so existing FIFOs keep target_latency. */
-  override lazy val latency : Int = target_latency + (if (registerPortACmd || registerPortBCmd) 1 else 0)
+   * +1 read latency on that port. The published latency follows port A only:
+   * the USB TRB fetch times its sample off this number, and port B's own
+   * rsp.valid already includes its cmd register. */
+  override lazy val latency : Int = target_latency + (if (registerPortACmd) 1 else 0)
   assert(target_latency == 2 || target_latency == 1)
   assert(read_write_ports == 2 || read_write_ports == 1)
 

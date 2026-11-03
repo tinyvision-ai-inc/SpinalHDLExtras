@@ -77,6 +77,12 @@ class Axi4ToPipelinedMemoryBus(config: Axi4ToPipelinedMemoryBusConfig) extends C
 
   val addr_increment = RegInit(U(0, log2Up(1 << io.axi.ar.size.maxValue.toInt) bits))
 
+  /* A beat narrower than the bus (the 4-byte tail of a 12-byte IN) is one
+   * aligned line read. The AXI beat count is unchanged, so RLAST still
+   * follows AR.len. The LRAM stays unmasked; the word is returned whole. */
+  val lineBytes = config.axiConfig.dataWidth / 8
+  val lineMask = U((1 << log2Up(lineBytes)) - 1, config.axiConfig.addressWidth bits)
+
   val write_area = new Area {
     // --- Write Path Registers ---
     val aw_reg = Reg(cloneOf(io.axi.aw))
@@ -137,7 +143,18 @@ class Axi4ToPipelinedMemoryBus(config: Axi4ToPipelinedMemoryBusConfig) extends C
           r.resp := Axi4.resp.SLVERR
         }
       }
-      r.data := rsp
+      /* A 1-byte or 2-byte beat (the tail of a 17-byte or 14-byte IN) is
+       * still one line. Copy those bytes onto every lane so the master
+       * takes them whether it samples the addressed lane or the low lane.
+       * A 4-byte or full-width beat stays the raw line: the 12-byte IN
+       * already completes that way. */
+      val nBytes = rsp.getWidth / 8
+      val beatAddr = (ar_reg.addr + (rspCount.value << ar_reg.size).resize(ar_reg.addr.getWidth)).resize(ar_reg.addr.getWidth)
+      val off = (beatAddr & U(nBytes - 1, beatAddr.getWidth bits)).resize(log2Up(nBytes) bits)
+      val rotated = rsp.rotateRight((off @@ U(0, 3 bits)).resize(log2Up(rsp.getWidth) bits))
+      val repByte = Cat(Seq.fill(nBytes)(rotated(7 downto 0)))
+      val repHalf = Cat(Seq.fill(nBytes / 2)(rotated(15 downto 0)))
+      r.data := Mux(ar_reg.size === 0, repByte, Mux(ar_reg.size === 1, repHalf, rsp))
       r.id := ar_reg.id
       r
     }) <> io.axi.r
@@ -215,7 +232,7 @@ class Axi4ToPipelinedMemoryBus(config: Axi4ToPipelinedMemoryBusConfig) extends C
     sReadBurstSendPmb.whenIsActive {
       read_area.readMode := True
       io.pmb.cmd.valid           := !read_area.readStall // PMB command is valid
-      io.pmb.cmd.payload.address := read_area.current_read_addr
+      io.pmb.cmd.payload.address := read_area.current_read_addr & ~lineMask
       io.pmb.cmd.payload.write   := False // It's a read command
 
       assert(read_area.read_pmb_cmds_sent <= (read_area.ar_reg.len))
@@ -343,7 +360,7 @@ class Axi4ToPipelinedMemoryBusTestbench extends Component {
     val axi = slave(Axi4(axiConfig))
   }
 
-  val dataMemory = Memories(MemoryRequirement(Bits(64 bits), num_elements = 1 << 17, numReadWritePorts = 1, numReadPorts = 0, numWritePorts = 0, needsMask = false))
+  val dataMemory = Memories(MemoryRequirement(Bits(64 bits), num_elements = 1024, numReadWritePorts = 1, numReadPorts = 0, numWritePorts = 0, needsMask = false))
 
   val axi2pmb = Axi4ToPipelinedMemoryBus(Axi4ToPipelinedMemoryBusConfig(axiConfig, 4, readResponseFifoLatency = 0))
   axi2pmb.io.pmb >> dataMemory.pmbs().head
@@ -470,6 +487,75 @@ class Axi4ToPipelinedMemoryBusTester extends AnyFunSuite {
       }
 
       dut.clockDomain.waitSampling(10)
+    }
+  }
+
+  /* 12-byte IN at an 8-byte-aligned address: one full beat, then a 4-byte tail.
+   * The tail must come back as one AXI beat with RLAST, from the aligned line. */
+  test("twelve-byte-tail") {
+    Config.sim.doSim(new Axi4ToPipelinedMemoryBusTestbench()) { dut =>
+      SimTimeout(1000 us)
+      dut.clockDomain.forkStimulus(100 MHz)
+
+      Seq(dut.io.axi.aw, dut.io.axi.ar, dut.io.axi.w).foreach(x => x.valid #= false)
+      Seq(dut.io.axi.r, dut.io.axi.b).foreach(x => x.ready #= false)
+      dut.clockDomain.waitSampling(10)
+
+      val base = 0x1000
+      val word0 = BigInt("0706050403020100", 16)
+      val word1 = BigInt("0F0E0D0C0B0A0908", 16)
+
+      dut.io.axi.aw.addr #= base
+      dut.io.axi.aw.len #= 1
+      dut.io.axi.aw.size #= 3
+      dut.io.axi.aw.burst #= 1
+      dut.io.axi.aw.valid #= true
+      dut.clockDomain.waitSamplingWhere(dut.io.axi.aw.ready.toBoolean)
+      dut.io.axi.aw.valid #= false
+
+      for ((data, last) <- Seq((word0, false), (word1, true))) {
+        dut.io.axi.w.valid #= true
+        dut.io.axi.w.strb #= 0xff
+        dut.io.axi.w.data #= data
+        dut.io.axi.w.last #= last
+        dut.clockDomain.waitSamplingWhere(dut.io.axi.w.ready.toBoolean)
+        dut.io.axi.w.valid #= false
+      }
+      dut.io.axi.b.ready #= true
+      dut.clockDomain.waitSamplingWhere(dut.io.axi.b.valid.toBoolean)
+      dut.clockDomain.waitSampling()
+      dut.io.axi.b.ready #= false
+
+      def readBeat(addr: Int, size: Int, expect: BigInt): Unit = {
+        dut.io.axi.ar.addr #= addr
+        dut.io.axi.ar.len #= 0
+        dut.io.axi.ar.size #= size
+        dut.io.axi.ar.burst #= 1
+        dut.io.axi.ar.valid #= true
+        dut.clockDomain.waitSamplingWhere(dut.io.axi.ar.ready.toBoolean)
+        dut.io.axi.ar.valid #= false
+
+        dut.io.axi.r.ready #= true
+        dut.clockDomain.waitSamplingWhere(dut.io.axi.r.valid.toBoolean)
+        assert(dut.io.axi.r.last.toBoolean, s"RLAST missing for addr 0x${addr.toHexString} size $size")
+        assert(dut.io.axi.r.data.toBigInt == expect,
+          s"data 0x${dut.io.axi.r.data.toBigInt.toString(16)} at 0x${addr.toHexString}, expected 0x${expect.toString(16)}")
+        dut.clockDomain.waitSampling()
+        dut.io.axi.r.ready #= false
+        dut.clockDomain.waitSampling(5)
+      }
+
+      readBeat(base, 3, word0)
+      readBeat(base + 8, 2, word1)
+      readBeat(base + 4, 2, word0)
+      /* 14-byte IN ends with a 2-byte beat at +12. 17-byte IN ends with
+       * a 1-byte beat. Both must return RLAST with that byte on every lane. */
+      val pair = BigInt("0D0C", 16)
+      val pairLanes = (0 until 4).foldLeft(BigInt(0))((acc, _) => (acc << 16) | pair)
+      val one = BigInt("0E", 16)
+      val oneLanes = (0 until 8).foldLeft(BigInt(0))((acc, _) => (acc << 8) | one)
+      readBeat(base + 12, 1, pairLanes)
+      readBeat(base + 14, 0, oneLanes)
     }
   }
 }
