@@ -28,19 +28,16 @@ object LatticeMemories {
         } else {
           lram_available_maps(Component.toplevel) = lram_available - 1
           val latency = requirements.latencyRange._2.min(2)
-          /* Port A is the USB AXI port (CSA). Leave it combinatorial: a
-           * register there makes the TRB word visible one clock after the
-           * fetch compare. Port B is the CPU/video arbiter (CSB). That pin
-           * missed setup by 0.363 ns on the 4-lane signoff because the LRAM
-           * setup is 5.948 ns and the command was still combinational. */
-          val registerUsbTrbPortA = false
-          val registerUsbTrbPortB = true
+          /* usb_trb_memory cmd ports stay combinatorial, as on the stable
+           * xm0y image. A registered CSA/CSB made the TRB write visible
+           * one clock after the fetch compare. */
+          val registerUsbTrbLramCmd = false
           SpinalInfo(s"Using LRAM for ${requirements}, ${lram_available} lrams remaining")
           (requirements.numReadPorts, requirements.numWritePorts, requirements.numReadWritePorts) match {
             case (1, 1, 0) => new PDPSC512K_Mem(target_latency = latency, initialContent = requirements.initialContent)
             case (0, 0, 1) => new DPSC512K_Mem(target_latency = latency, read_write_ports = 1, initialContent = requirements.initialContent)
             case (0, 0, 2) => new DPSC512K_Mem(target_latency = latency, read_write_ports = 2, initialContent = requirements.initialContent,
-              registerPortACmd = registerUsbTrbPortA, registerPortBCmd = registerUsbTrbPortB)
+              registerPortACmd = registerUsbTrbLramCmd, registerPortBCmd = registerUsbTrbLramCmd)
           }
         }
       }
