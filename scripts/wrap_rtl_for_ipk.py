@@ -29,9 +29,45 @@ def find_module_end(text: str, top: str) -> int:
     return start + end.end()
 
 
+def _block_start(text: str, module_start: int) -> int:
+    """Start of a module including the attribute lines directly above it."""
+    start = module_start
+    while start > 0:
+        prev = text.rfind("\n", 0, start - 1) + 1
+        if not text[prev:start].lstrip().startswith("(*"):
+            break
+        start = prev
+    return start
+
+
+def hoist_top(text: str, top: str) -> str:
+    """Move the top module ahead of every other module.
+
+    Only the text after the top module's port list is encrypted, and Yosys
+    writes modules in name order, so without this most of the design stays
+    readable.
+    """
+    first = re.search(r"^module\s+\w+", text, re.MULTILINE)
+    top_start = find_module_start(text, top)
+    if not first or first.start() == top_start:
+        return text
+    end = re.search(r"^endmodule\b[^\n]*\n?", text[top_start:], re.MULTILINE)
+    if not end:
+        raise ValueError(f"endmodule of {top!r} not found")
+    block_start = _block_start(text, top_start)
+    block_end = top_start + end.end()
+    block = text[block_start:block_end]
+    rest = text[:block_start] + text[block_end:]
+    insert = _block_start(rest, first.start())
+    return rest[:insert] + block.rstrip("\n") + "\n\n" + rest[insert:]
+
+
 def wrap_rtl(text: str, top: str, *, encrypt: bool = True) -> str:
     if encrypt and "`pragma protect begin" in text:
         raise ValueError("RTL already wrapped for IP packaging")
+
+    if encrypt:
+        text = hoist_top(text, top)
 
     module_start = find_module_start(text, top)
     module_end = find_module_end(text, top)
