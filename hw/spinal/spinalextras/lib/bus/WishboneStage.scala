@@ -8,7 +8,7 @@ import spinal.lib.bus.wishbone.{AddressGranularity, Wishbone, WishboneConfig}
 import spinal.lib.sim.ScoreboardInOrder
 import spinal.lib.wishbone.sim.{WishboneDriver, WishboneMonitor, WishboneSequencer, WishboneTransaction}
 import spinalextras.lib.Config
-import spinalextras.lib.logging.{GlobalLogger, PipelinedMemoryBusLogger, WishboneBusLogger}
+import spinalextras.lib.logging.{GlobalLogger, WishboneBusLogger}
 
 case class WishboneCmd(config: WishboneConfig) extends Bundle {
   val WE        = Bool()
@@ -164,37 +164,36 @@ object WishboneStream {
 
 object WishboneStage {
   def apply(bus : Wishbone): Wishbone = {
-      val adapter_pmb = WishboneToPipelinedMemoryBus(bus, 1)
-      PipelinedMemoryBusToWishbone(adapter_pmb.cmdM2sPipe(), 1, bus.config)
+    apply(bus, m2s_stage = true, s2m_stage = false)
   }
 
   /**
-   * Takes in / returns a master-driven signal
-   * @return
+   * Takes in / returns a master-driven signal.
+   * Stages through [[WishboneStream]] so ERR rides with ACK on the rsp Flow.
+   * The PMB adapters cannot carry write ERR: PMB has no write response.
    */
   def apply(bus: Wishbone, m2s_stage: Boolean, s2m_stage: Boolean = false): Wishbone = {
-    {
-      if(!m2s_stage && !s2m_stage)
-        return bus
+    if(!m2s_stage && !s2m_stage)
+      return bus
 
-      val adapter_pmb = WishboneToPipelinedMemoryBus(bus, 1, wishboneIsMaster = true)
-      val out_bus = PipelinedMemoryBusToWishbone(
-        (m2s_stage, s2m_stage) match {
-          case (true, true) => adapter_pmb.cmdM2sPipe().cmdS2mPipe().rspPipe()
-          case (false, true) => adapter_pmb.cmdS2mPipe().rspPipe()
-          case (true, false) => adapter_pmb.cmdM2sPipe()
-          case (false, false) => adapter_pmb
-        },
-        1, bus.config)
-
-      GlobalLogger(
-        Set("debug-wb"),
-        WishboneBusLogger.flows(bus, out_bus.setName("out_bus")),
-        PipelinedMemoryBusLogger.flows(adapter_pmb.setName("adapter_pmb"))
-      )
-
-      out_bus
+    val inConv = Wb2WishboneStream_s2m(bus.config, rspPipe = false)
+    inConv.io.bus <> bus
+    val staged = (m2s_stage, s2m_stage) match {
+      case (true, true) => inConv.io.stream.cmdM2sPipe().cmdS2mPipe().rspPipe()
+      case (false, true) => inConv.io.stream.cmdS2mPipe().rspPipe()
+      case (true, false) => inConv.io.stream.cmdM2sPipe()
+      case (false, false) => inConv.io.stream
     }
+    val outConv = Wb2WishboneStream_m2s(bus.config)
+    outConv.io.stream <> staged
+    val out_bus = outConv.io.bus
+
+    GlobalLogger(
+      Set("debug-wb"),
+      WishboneBusLogger.flows(bus, out_bus.setName("out_bus"))
+    )
+
+    out_bus
   }
 }
 

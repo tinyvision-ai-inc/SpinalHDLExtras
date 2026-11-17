@@ -24,7 +24,7 @@ class PixelFlow2Fragment[T <: Data](val dataType: HardType[T]) extends Component
 
   // last is a pulse on FV falling edge, not level ~FV. Level-last tagged every
   // early new-frame beat that still saw frame_valid=0 (byte2pixel Delay(fv)
-  // lag after SOF) as EOF → extra empty UVC frames (~2× sof on flir_uab).
+  // lag after SOF) as EOF → extra empty UVC frames (~2× sof).
   val fvFall = !io.pixelFlow.frame_valid && RegNext(io.pixelFlow.frame_valid, False)
 
   io.pixelFragment <>

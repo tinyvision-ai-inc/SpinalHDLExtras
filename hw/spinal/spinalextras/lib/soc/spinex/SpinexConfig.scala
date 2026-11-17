@@ -8,7 +8,7 @@ import spinal.lib.com.spi.ddr.{SpiXdrMasterCtrl, SpiXdrParameter}
 import spinal.lib.com.uart.{UartCtrlGenerics, UartCtrlInitConfig, UartCtrlMemoryMappedConfig, UartParityType, UartStopType}
 import spinalextras.lib.soc.{DeviceTree, DeviceTreeProvider}
 import spinalextras.lib.soc.peripherals.{UartCtrlPlugin, XipFlashPlugin}
-import spinalextras.lib.soc.spinex.plugins.{I2CPlugin, IdentificationPlugin, JTagPlugin, OpenCoresI2CPlugin, TimerPlugin, Uart16550CtrlPlugin}
+import spinalextras.lib.soc.spinex.plugins.{BusErrorPlugin, BusErrorTestPlugin, I2CPlugin, IdentificationPlugin, JTagPlugin, OpenCoresI2CPlugin, TimerPlugin, Uart16550CtrlPlugin}
 import vexriscv.ip.fpu.FpuParameter
 import vexriscv.ip.{DataCacheConfig, InstructionCacheConfig}
 import vexriscv.{VexRiscv, plugin}
@@ -98,6 +98,8 @@ case class SpinexConfig(onChipRamSize      : BigInt,
                         plugins : Seq[SpinexPlugin] = SpinexConfig.defaultPlugins
                        ){
   require(pipelineApbBridge || pipelineMainBus, "At least pipelineMainBus or pipelineApbBridge should be enable to avoid wipe transactions")
+  require(hardwareBreakpointCount == 0 || (hardwareBreakpointCount & (hardwareBreakpointCount - 1)) == 0,
+    "hardwareBreakpointCount must be 0 or a power of two (Sdtrig tselect)")
 
   def withPlugins(extraPlugins: SpinexPlugin*): SpinexConfig = {
     this.copy(plugins = extraPlugins ++ this.plugins)
@@ -105,6 +107,13 @@ case class SpinexConfig(onChipRamSize      : BigInt,
 
   def appendPlugins(extraPlugins: SpinexPlugin*): SpinexConfig = {
     this.copy(plugins = this.plugins ++ extraPlugins)
+  }
+
+  /** Keep [[BusErrorPlugin]] first so loggingEnabled is set before other BusIfs elaborate. */
+  def busErrorPluginFirst: SpinexConfig = {
+    val be = plugins.collect { case p: BusErrorPlugin => p }
+    if (be.isEmpty) this
+    else copy(plugins = be ++ plugins.filterNot(_.isInstanceOf[BusErrorPlugin]))
   }
 
 }
@@ -126,7 +135,7 @@ object SpinexConfig{
     withUart = true,
     ram_mapping = SizeMapping(0x40000000L, 0x0004000 Bytes),
     rom_mapping = SizeMapping(0x20200000L, 0x00010000)
-  )
+  ).appendPlugins(new BusErrorTestPlugin())
 
   def default : SpinexConfig = default()
   def default(bigEndian : Boolean = false, withJtag : Boolean = true,
@@ -142,6 +151,9 @@ object SpinexConfig{
               )),
               hwFpu : Option[FpuParameter] = None,
               ram_name : String = "",
+              withBusErrorLogger : Boolean = true,
+              busErrorLogDepth : Int = 32,
+              busErrorLocalDepth : Int = 4,
               // Takes roughly 200 gates; but is much faster performance. 55 -> 73 c/s
               withFullBarrel : Boolean = false,
               icacheConfig : Option[InstructionCacheConfig] = Some(InstructionCacheConfig(
@@ -157,7 +169,8 @@ object SpinexConfig{
                 twoCycleRam = true,
                 twoCycleCache = true
               )),
-              dcacheConfig : Option[DataCacheConfig] = None
+              dcacheConfig : Option[DataCacheConfig] = None,
+              hardwareBreakpointCount : Int = 4
              ) =  SpinexConfig(
     onChipRamSize         = 0x00010000,
     onChipRamHexFile      = null,
@@ -165,9 +178,9 @@ object SpinexConfig{
     pipelineMainBus       = false,
     pipelineApbBridge     = true,
     gpioWidth = 32,
-    hardwareBreakpointCount = 3,
+    hardwareBreakpointCount = hardwareBreakpointCount,
     withJtag = withJtag,
-    cpuPlugins = ArrayBuffer( //DebugPlugin added by the toplevel
+    cpuPlugins = ArrayBuffer( // EmbeddedRiscvJtag added by the toplevel when withJtag
       icacheConfig.map(cfg =>
         new IBusCachedPlugin(config = cfg,
           resetVector = resetVector,
@@ -196,7 +209,8 @@ object SpinexConfig{
         bigEndian = bigEndian
       )),
       new CsrPlugin(CsrPluginConfig.small(mtvecInit = null).copy(mtvecAccess = WRITE_ONLY,
-        ecallGen = true, wfiGenAsNop = true, withPrivilegedDebug = withJtag, xtvecModeGen = false, debugTriggers = 8)),
+        ecallGen = true, wfiGenAsNop = true, withPrivilegedDebug = withJtag, xtvecModeGen = false,
+        debugTriggers = if (withJtag) hardwareBreakpointCount else 0)),
       hwFpu.map(x => new FpuPlugin(p = x)).orNull,
       mulDivOptions.map(_.mulUnrollFactor.getOrElse(0) == 0 generate new MulPlugin(
         inputBuffer = true,
@@ -268,7 +282,7 @@ object SpinexConfig{
       rxFifoDepth = 16
     ),
     externalInterrupts = 8,
-    plugins = plugins(withJtag = withJtag, xipConfig, flashClockDomain, withUart = withUart, withI2C = withI2C, ram_mapping = ram_mapping, rom_mapping = rom_mapping, ram_name = ram_name)
+    plugins = plugins(withJtag = withJtag, xipConfig, flashClockDomain, withUart = withUart, withI2C = withI2C, ram_mapping = ram_mapping, rom_mapping = rom_mapping, ram_name = ram_name, withBusErrorLogger = withBusErrorLogger, busErrorLogDepth = busErrorLogDepth, busErrorLocalDepth = busErrorLocalDepth)
   )
 
   def fast = {
@@ -294,8 +308,13 @@ object SpinexConfig{
               ram_mapping : SizeMapping = SizeMapping(0x40000000l, 0x00010000 Bytes),
               rom_mapping : SizeMapping = SizeMapping(0x20000000L, 0x00010000),
               ram_name : String = "",
+              withBusErrorLogger : Boolean = true,
+              busErrorLogDepth : Int = 32,
+              busErrorLocalDepth : Int = 4,
              ) = {
     val plugins : ArrayBuffer[SpinexPlugin] = mutable.ArrayBuffer(
+      BusErrorPlugin(depth = if (withBusErrorLogger) busErrorLogDepth else 0,
+                     localDepth = if (withBusErrorLogger) busErrorLocalDepth else 0),
       IdentificationPlugin(registerLocation = 0x3000),
       //RandomPlugin(registerLocation = 0x3060),
       TimerPlugin(),

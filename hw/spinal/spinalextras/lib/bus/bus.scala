@@ -36,7 +36,12 @@ package object bus {
 
     def masterHasRequest = isCycle && STB
 
-    private def slaveRequestAck = if (config.isPipelined) !STALL else ACK
+    /** B4: ACK and ERR terminate the cycle. Slaves that leave ERR unconnected
+      * stay False (Wishbone.clear() / useERR=false). */
+    private def slaveErr = if (bus.ERR != null) bus.ERR else False
+    private def slaveTerminated = ACK || slaveErr
+
+    private def slaveRequestAck = if (config.isPipelined) !STALL else slaveTerminated
 
     def isAcceptingRequests = if (config.isPipelined) !STALL else True
 
@@ -51,7 +56,7 @@ package object bus {
 
     def isRequestAck = masterHasRequest && slaveRequestAck
 
-    def isResponse = if (config.isPipelined) isCycle && ACK else masterHasRequest && ACK
+    def isResponse = if (config.isPipelined) isCycle && slaveTerminated else masterHasRequest && slaveTerminated
 
     @deprecated("This status check doesn't map pipelined modes correctly, prefer masterHasRequest or isRequestAck " +
       "depending on whether you want to check if a request exists or if one was acknowledged")

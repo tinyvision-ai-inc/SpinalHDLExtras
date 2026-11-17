@@ -1,6 +1,7 @@
 package spinalextras.lib.bus.simple
 
 import spinal.core._
+import spinal.lib._
 import spinal.lib.bus.misc._
 import spinal.lib.bus.regif.{BusIf, ClassName}
 import spinal.lib.bus.simple.PipelinedMemoryBus
@@ -19,7 +20,7 @@ case class PipelinedMemoryBusInterface(bus: PipelinedMemoryBus, sizeMap: SizeMap
 
   lazy val reg_wrerr: Bool = Reg(Bool(), init = False)
   val bus_rdata: Bits  = Bits(busDataWidth bits)
-  val reg_rderr: Bool = False
+  val reg_rderr: Bool = Bool()
   val reg_rdata: Bits = Bits(busDataWidth bits)
 
   override val writeData: Bits = bus.cmd.data
@@ -39,21 +40,42 @@ case class PipelinedMemoryBusInterface(bus: PipelinedMemoryBus, sizeMap: SizeMap
   val halted = Bool()
   halted := False
 
+  setReservedAddressErrorState(true)
+  setReservedAddressReadValue(0xA5A5A5A5L)
+
   bus.cmd.ready := !halted && bus.cmd.valid
   bus.rsp.payload.data := bus_rdata
-  bus.rsp.valid := RegNext(doRead) init(False)
+  /* Hole writes pulse `reg_wrerr` the cycle after `doWrite`; sample it then.
+   * Implemented writes stay posted (no rsp). RAM is not this BusIf. */
+  val rdRsp = RegNext(doRead) init(False)
+  val rdErr = RegNext(doRead && bus_slverr) init(False)
+  val wrRsp = RegNext(doWrite) init(False)
+  bus.rsp.valid := rdRsp || (wrRsp && reg_wrerr)
+  bus.rsp.payload.error := rdErr || (wrRsp && reg_wrerr)
+
+  if (spinalextras.lib.bus.BusError.loggingEnabled) {
+    val unimpl = Flow(spinalextras.lib.bus.BusErrorEvent())
+    unimpl.setName((if (bus.name != null && bus.name.nonEmpty) bus.name else "pmb") + "_unimpl")
+    /* bus_slverr is read-only without SecFireWall. Hole writes: reg_wrerr is
+     * True with wrRsp (cycle after doWrite), not on the doWrite cycle. */
+    val wrAddr = RegNextWhen(bus.cmd.address, doWrite)
+    unimpl.valid := (doRead && bus_slverr) || (wrRsp && reg_wrerr)
+    unimpl.payload.assign(
+      Mux(wrRsp && reg_wrerr, wrAddr, bus.cmd.address),
+      wrRsp && reg_wrerr,
+      spinalextras.lib.bus.BusErrorMaster.DBus,
+      spinalextras.lib.bus.BusErrorCause.UNIMPL,
+      spinalextras.lib.bus.BusErrorSentinel.UNIMPL)
+    spinalextras.lib.bus.BusError.unimplTap(unimpl, spinalextras.lib.bus.BusErrorMaster.DBus)
+  }
 
   override def readHalt(): Unit = halted := True
 
   override def writeHalt(): Unit = halted := True
 
-  //override def busDataWidth: Int = bus.config.dataWidth
-
-//  override type B = this.type
-
   override def getModuleName = moduleName.name
 
   override  val busAddrWidth: Int = bus.config.addressWidth
   override lazy val readData: Bits = bus.rsp.data
-  override lazy val readError: Bool = False
+  override lazy val readError: Bool = bus_slverr
 }

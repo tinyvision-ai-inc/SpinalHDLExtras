@@ -270,6 +270,7 @@ package object bus {
     bmb.rsp.map(r => {
       val rsp = cloneOf(pmb.rsp.payload)
       rsp.data := r.data
+      rsp.error := False
       rsp
     }).toFlow >> pmb.rsp
   }}
@@ -291,6 +292,7 @@ package object bus {
     output.map(r => {
       val rsp = cloneOf(m.bus.rsp.payload)
       rsp.data := r.fragment
+      rsp.error := False
       rsp
     }).toFlow >> m.bus.rsp
 
@@ -436,7 +438,7 @@ package object bus {
     bus.CYC := cmdStage.valid
     bus.STB := cmdStage.valid
 
-    rsp.ready := cmdStage.valid && !bus.WE && (bus.ACK || bus.ERR)
+    rsp.ready := cmdStage.valid && (bus.ACK || bus.ERR) && (!bus.WE || bus.ERR)
     rsp.data  := bus.DAT_MISO
     rsp.error := bus.ERR
     bus
@@ -456,7 +458,6 @@ package object bus {
 
   MultiInterconnectConnectFactory.AddHandler { case (m: DBusSimpleBusExt, s: PipelinedMemoryBusMultiBus) => new Composite(m.bus, "dbus_to_pmb") with HasFormalProperties {
     m.bus.toPipelinedMemoryBus() >> s.bus
-    m.bus.rsp.error := False
 
     override protected def formalProperties() = new FormalProperties(this) {
       addFormalProperty(new DBusSimpleFormal(m.bus).contract.outstandingReads.asUInt === s.bus.contract.outstandingReads.value, "Oustanding reads match")

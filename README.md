@@ -21,6 +21,9 @@ library source lives under `hw/spinal/spinalextras/lib`.
 - **`LMMI`** — Lattice Memory Master Interface support, including a peripheral mapper.
 - **`WishboneStage`**, **`DirectBus`**, **`AXIBusLogger`** — pipeline staging, direct point-to-point
   buses, and AXI bus traffic logging.
+- **Bus error logger** — `BusError` / `BusErrorPlugin`: miss, timeout, and BusIf holes complete with
+  sentinels and optionally log into a second FlowLogger at `0xe0008000`. See
+  [docs/bus-error-logger.md](docs/bus-error-logger.md).
 
 ## On-Chip Network / NoC (`lib/noc`)
 
@@ -131,7 +134,7 @@ A configurable RISC-V SoC (VexRiscv core) with a plugin-based peripheral archite
   case class, and IP-packaging entry point.
 - **`lib/soc/spinex/plugins`** — VexRiscv-style plugins that attach peripherals to the CPU/bus:
   `PeripheralBus`, `TimerPlugin`, `I2CPlugin`/`OpenCoresI2CPlugin`, `Uart16550CtrlPlugin`,
-  `JTagPlugin`, `EventLoggerPlugin`, `IdentificationPlugin`.
+  `JTagPlugin`, `EventLoggerPlugin`, `BusErrorPlugin`, `IdentificationPlugin`.
 - **`lib/soc/bus/WishbonePlugin`** — Wishbone bus attachment for the SoC.
 - **`CSREventManager`** — a control/status-register-driven event manager.
 - **`DeviceTree`** — builds a device tree overlay (`{design}.overlay`) describing the assembled SoC.
@@ -166,6 +169,19 @@ unconnected component IOs by name, a bit-packing helper (`VariableWidthBits`), r
 helpers (`RegisterTools`), rate limiting (`RateLimitFlow`), a byte/bit slip encoder (`SlipEncoder`),
 math types (`Rational`, `Complex`), a maximal-length LFSR-based `RandomNumberGenerator`, and
 `Obfuscater` (renames/obfuscates a generated netlist's signal names).
+
+## Scripts (`scripts/`)
+
+Radiant / IPGen helpers used by `IPGenerator` and by design packagers (thin shims may remain
+in product trees):
+
+- **`validate_sdc_paths.py`** — SDC vs Verilog checks (including Synplify-style `get_cells` globs);
+  run pre- and post-yosys from `IPGenerator`.
+- **`rewrite_sdc_for_yosys.py`** — path rewrite after `yosys_opt`.
+- **`wrap_rtl_for_ipk.py`**, **`encrypt_rtl_leave_usb23.py`** — IPK wrap and Lattice encrypt with
+  USB23 HIP carve-out.
+- **`gen_ipk_tcl.py`**, **`gen_ip_docs.py`**, **`build_ipx_bundle.py`** — ippackc Tcl, intro HTML,
+  IPX bundle assembly.
 
 ## Tests & Examples
 

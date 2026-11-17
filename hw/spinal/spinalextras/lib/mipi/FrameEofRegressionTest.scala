@@ -11,7 +11,7 @@ import spinalextras.lib.mipi.MIPIDataTypes.RAW8
 import scala.collection.mutable.ArrayBuffer
 
 /**
- * Regressions for flir_uab image/black blink and the "no frames" continueWhen bug:
+ * Regressions for image/black blink and the "no frames" continueWhen bug:
  *
  * 1. PixelFlow2Fragment must hold the last pixel until FV falls (else no EOF).
  * 2. last must be FV falling-edge, not level ~FV (else early SOF pixels → extra EOFs).
@@ -101,8 +101,8 @@ class FrameEofRegressionTest extends AnyFunSuite {
     }
   }
 
-  test("byte2pixel+P2F: SOF/FE yields one lastFire per frame (flir-like gear)") {
-    // flir_uab-ish: 2 lane × gear8 → 16b geared, 4×RAW8 outputs → DT_WIDTH=32 → byte_clock_fifo
+  test("byte2pixel+P2F: SOF/FE yields one lastFire per frame (2lane gear8)") {
+    // 2 lane × gear8 → 16b geared, 4×RAW8 outputs → DT_WIDTH=32 → byte_clock_fifo
     val cfg = MIPIConfig(numRXLanes = 2, rxGear = 8, outputLanes = 4, refDt = RAW8, dphyByteFreq = 90 MHz)
     val pixelFreq = 90 MHz
 

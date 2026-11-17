@@ -17,7 +17,7 @@ import spinalextras.lib.lattice.IPX
 import spinalextras.lib.logging.{FlowLogger, GlobalLogger, SignalLogger}
 import spinalextras.lib.misc.AutoInterconnect.buildInterconnect
 import spinalextras.lib.misc.ClockSpecification
-import spinalextras.lib.soc.{DeviceTree, DeviceTreeProvider}
+import spinalextras.lib.soc.{DeviceTree, DeviceTreeProvider, DiagramNet}
 import spinalextras.lib.soc.spinex.plugins.{EventLoggerPlugin, JTagPlugin}
 import vexriscv.Riscv.{CSRRW, DIV, FENCE_I, MULH}
 import vexriscv.ip.{DataCacheMemBus, InstructionCacheMemBus}
@@ -39,6 +39,11 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
   }
   noIoPrefix()
 
+  /** Driven from TinyClunx / WB interconnect; idle on SpinexMinimal. */
+  var axiUsbBusErrorIn: Flow[spinalextras.lib.bus.BusErrorEvent] = null
+  var axiMmiBusErrorIn: Flow[spinalextras.lib.bus.BusErrorEvent] = null
+  var wbBusErrorIn: Flow[spinalextras.lib.bus.BusErrorEvent] = null
+
   val mainClockDomain = ClockDomain.current
 
   val resetCtrlClockDomain = ClockDomain(
@@ -50,7 +55,8 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
 
   val resetCtrl = new ClockingArea(resetCtrlClockDomain) {
     val mainClkResetUnbuffered  = False
-    /** Pulse from RCC CPU_RESET: re-arm the 10 us POR so XIP/SoC re-init. */
+    /** Driven by board/top (e.g. TinyvisionTopLevel `Rcc.io.cpuResetPulse`).
+      * Re-arms the 10 us POR so XIP/SoC re-init. Default untied False. */
     val softwareReset = False
 
     val systemClkReset = Timeout(10 us)
@@ -64,6 +70,13 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
     }
 
     val systemReset  = RegNext(mainClkResetUnbuffered, init = True)
+
+    // Debug Module / DTM clock domain reset: FPGA BOOT known-state + one-shot
+    // Timeout only. Never clear() on board/softwareReset — that was wedging
+    // OpenOCD (DM shared systemReset). Power cycle or bitstream reload re-inits
+    // via BOOT. OpenOCD can still reset DM logic via dmcontrol.dmactive.
+    val debugPorTimeout = Timeout(10 us)
+    val debugReset = RegNext(!debugPorTimeout, init = True)
   }
 
   val systemClockDomain = ClockDomain(
@@ -76,7 +89,16 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
     frequency = mainClockDomain.frequency
   )
 
-  val debugClockDomain = systemClockDomain
+  val debugClockDomain = ClockDomain(
+    clock = mainClockDomain.readClockWire,
+    reset = resetCtrl.debugReset,
+    config = ClockDomainConfig(
+      resetActiveLevel = HIGH,
+      resetKind = SYNC
+    ),
+    frequency = mainClockDomain.frequency
+  )
+  debugClockDomain.setSynchronousWith(systemClockDomain)
 
   var interconnect, directInterconnect: MultiInterconnectByTag = null
 
@@ -103,7 +125,8 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
         )
     }
 
-    // Extra reset is hart-only; interconnect stays on systemReset.
+    // Hart-only reset; interconnect stays on systemReset. Board/top drives
+    // this from Rcc (same pulse as resetCtrl.softwareReset).
     val cpuSoftReset = False
     val cpuClockDomain = systemClockDomain.copy(
       reset = systemClockDomain.readResetWire || cpuSoftReset
@@ -243,6 +266,12 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
       master = apbBridge.io.apb,
       slaves = apbMapping
     )
+    val apbIn = apbBridge.io.apb
+    val apbMiss = Flow(spinalextras.lib.bus.BusErrorEvent())
+    apbMiss.setName("apb_decode_miss")
+    apbMiss.valid := apbIn.PSEL.lsb && apbIn.PENABLE && apbDecoder.io.output.PSEL === 0
+    apbMiss.payload.assign(apbIn.PADDR.resize(32 bits), apbIn.PWRITE, spinalextras.lib.bus.BusErrorMaster.DBus, spinalextras.lib.bus.BusErrorCause.DECERR)
+    spinalextras.lib.bus.BusError.reportFlow(apbMiss)
 
     val stagedBridge = PipelinedMemoryBus(32, 32).setName("interconnect")
     interconnect.addMaster(PipelinedMemoryBusMultiBus(stagedBridge.cmdM2sPipe().cmdS2mPipe().rspPipe().setName("interconnect_staged")), "dBus")
@@ -430,7 +459,7 @@ case class Spinex(config : SpinexConfig = SpinexConfig.default) extends Componen
 
 
 object Spinex{
-  def generate_ipx[T <: Component](report : SpinalReport[T]): Unit = {
+  def generate_ipx[T <: Component](report : SpinalReport[T], obfuscate: Boolean = false): Unit = {
     val rtl_sourcess = Seq(
       "/blackbox/lattice/lifcl/BlackboxMemory.sv",
       "/opencores_i2c/rtl/verilog/i2c_master_bit_ctrl.v",
@@ -454,6 +483,7 @@ object Spinex{
 
     IPX.generate_ipx(report)
     DeviceTree.generate(report)
+    DiagramNet.generate(report, obfuscate)
   }
 
   def main(args: Array[String]) {

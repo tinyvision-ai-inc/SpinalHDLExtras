@@ -54,7 +54,7 @@ case class WishboneToPipelinedMemoryBus(pipelinedMemoryBusConfig : PipelinedMemo
   }
 
   //assert(io.pmb.cmd.valid === False || (io.wb.byteAddress() & (io.wb.config.wordAddressInc() - 1)) === 0, "PMB needs word alignment")
-  val pendingRead = RegInit(False) setWhen(io.pmb.readRequestFire) clearWhen(io.wb.ACK)
+  val pendingRead = RegInit(False) setWhen(io.pmb.readRequestFire) clearWhen(io.wb.isResponse)
   io.pmb.cmd.valid := io.wb.masterHasRequest & !pendingRead
   io.pmb.cmd.data := (if (allowDataResize) io.wb.DAT_MOSI.resized else io.wb.DAT_MOSI)
   io.pmb.cmd.address := addressMap(io.wb.byteAddress()).resized
@@ -65,11 +65,11 @@ case class WishboneToPipelinedMemoryBus(pipelinedMemoryBusConfig : PipelinedMemo
   } else {
     io.pmb.cmd.mask.setAll()
   }
-  if(io.wb.ERR != null) {
-    io.wb.ERR := False
-  }
   io.wb.DAT_MISO := io.pmb.rsp.data.resized
   io.wb.ACK := io.pmb.rsp.valid
+  if(io.wb.ERR != null) {
+    io.wb.ERR := io.pmb.rsp.valid && io.pmb.rsp.error
+  }
 
   when(io.wb.masterHasRequest) {
     when(io.wb.WE) {
@@ -133,8 +133,9 @@ case class PipelinedMemoryBusToWishbone(wbConfig: WishboneConfig, pipelinedMemor
   //test_funcs.assertPMBContract(io.pmb)
   //test_funcs.assertWishboneBusContract(io.wb)
 
+  val wbDone = io.wb.isResponse
   val (readyForNewReq, hasOutstandingReq, reqWasWE) =
-    WishbonePipelinedHelpers.create_translation_signals(io.wb.WE, io.pmb.cmd.fire, io.wb.ACK,
+    WishbonePipelinedHelpers.create_translation_signals(io.wb.WE, io.pmb.cmd.fire, wbDone,
       if(wbConfig.isPipelined) rspQueue else 1)
 
   io.wb.assignByteAddress(io.pmb.cmd.address, allowAddressResize = true)
@@ -153,11 +154,23 @@ case class PipelinedMemoryBusToWishbone(wbConfig: WishboneConfig, pipelinedMemor
 
   io.pmb.cmd.ready := io.wb.isRequestAck
 
-  //assert(!io.wb.ACK || hasOutstandingReq, "Miscounted acks")
+  val wbErr = if (io.wb.ERR != null) io.wb.ERR else False
   val rsp = cloneOf(io.pmb.rsp)
-  rsp.valid := !reqWasWE & io.wb.isRequestAck
+  /* Reads always rsp. Successful writes stay posted. Peripheral ERR (timeout,
+   * UNIMPL, SLVERR) also rsp so DBusSimple's memory stage can take an access
+   * fault. `.stage()` lands that pulse the cycle after `cmd.ready`. */
+  rsp.valid := wbDone && (!reqWasWE || wbErr)
   rsp.payload.data := io.wb.DAT_MISO.resized
+  rsp.payload.error := wbErr
   io.pmb.rsp <> rsp.stage()
+
+  if (BusError.loggingEnabled) {
+    val ev = Flow(BusErrorEvent())
+    ev.setName("wb_slverr")
+    ev.valid := wbDone && wbErr
+    ev.payload.assign(io.pmb.cmd.address, reqWasWE, BusErrorMaster.DBus, BusErrorCause.SLVERR, io.wb.DAT_MISO)
+    BusError.reportFlow(ev)
+  }
 }
 
 object PipelinedMemoryBusToWishbone {

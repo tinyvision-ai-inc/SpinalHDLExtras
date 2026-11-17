@@ -95,7 +95,8 @@ case class byte2pixel(cfg : MIPIConfig,
   require(byte_clock_fast_enough, "Byte clock is not fast enough to handle this PHY as configured. Either increase the byte clock speed or correct the dphy clock frequency.")
   require(pixel_clock_fast_enough, "Pixel clock is not fast enough to handle this PHY as configured. Either increase the number out output lanes, increase the pixel clock frequency or correct the byte / dphy clock frequeny.")
 
-  // Depth-16 was too shallow under Soft-DPHY RX-FIFO bursts / CDC skew (flir: 90↔75 MHz).
+  // Depth-16 was too shallow under Soft-DPHY RX-FIFO bursts / CDC skew
+  // (byte_cd faster than pixel_cd).
   // Size to ≥2× clock ratio, power-of-two for StreamFifoCC.
   private def nextPow2(n: Int): Int = {
     var p = 1
@@ -181,7 +182,7 @@ case class byte2pixel(cfg : MIPIConfig,
       // in-frame tag: after SOF, fv rises immediately but fvD lags → early
       // new-frame pixels were tagged frame_valid=0. PixelFlow2Fragment uses
       // last=~frame_valid, so those beats became extra EOFs (full-size black
-      // UVC frames at ~2× sof — flir_uab live vs TPG).
+      // UVC frames at ~2× sof — live sensor vs TPG).
       val fvD = Delay(fv, 5)
       val fvTag = fv || fvD
       val pixV = conversion_area.pixel_stream.valid
@@ -193,7 +194,7 @@ case class byte2pixel(cfg : MIPIConfig,
       // meta-edge. The old "push when _1 changes" path also fired on valid
       // 1→0 at byte_cd when byte_cd > pixel_cd, so push ran at the full byte
       // rate while pop ran at pixel_cd — depth-16 StreamFifoCC overflowed
-      // (choppy / corrupt video on flir_uab: 90 MHz byte vs 75 MHz CPU pixel).
+      // (choppy / corrupt video when byte_cd is faster than pixel_cd).
       fifo.io.push.valid := pixV || fvFall
       // Hold the converted pixel until the CDC FIFO accepts it. Previously
       // pixel_stream.ready was tied True → silent drops on stall (alternating

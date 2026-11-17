@@ -2,7 +2,7 @@ package spinalextras.lib.bus
 
 import spinal.core._
 import spinal.lib._
-import spinal.lib.bus.amba4.axi.Axi4.resp.OKAY
+import spinal.lib.bus.amba4.axi.Axi4.resp.{DECERR, OKAY, SLVERR}
 import spinal.lib.bus.amba4.axi._
 import spinal.lib.bus.misc._
 import spinalextras.lib.logging.{FlowLogger, SignalLogger}
@@ -64,7 +64,7 @@ object AXIBusLogger {
       errored_aw.valid := b.resp =/= OKAY && b.fire
 
       val errored_ar = Flow(ar.payload)
-      errored_ar.payload := RegNextWhen(ar.payload, aw.fire)
+      errored_ar.payload := RegNextWhen(ar.payload, ar.fire)
       errored_ar.valid := r.resp =/= OKAY && r.fire
 
       Seq(
@@ -74,6 +74,45 @@ object AXIBusLogger {
         b.toFlowFire.takeWhen(b.resp =/= OKAY).setName(b.name + "Errors")
       )
     }).map(x => FlowLogger.asFlow(x))
+  }
+
+  /** One FlowLogger-sized bus-error record per failed burst (R last / B). */
+  def busError(axi: Axi4Bus, masterId: Int, name: String): Flow[BusErrorEvent] = {
+    val (_, aw, ar, r, _, b) = decompose(axi)
+    val lastAwAddr = RegNextWhen(aw.payload.addr, aw.fire)
+    val lastArAddr = RegNextWhen(ar.payload.addr, ar.fire)
+    val ev = Flow(BusErrorEvent())
+    ev.setName(name)
+    ev.valid := False
+    ev.payload.assignFromBits(B(0, ev.payload.getBitsWidth bits))
+
+    def causeOf(resp: Bits, data: Bits): UInt = {
+      val c = UInt(BusErrorCause.width bits)
+      when(resp === DECERR) {
+        c := BusErrorCause.DECERR
+      } elsewhen (BusErrorSentinel.isLane(data, BusErrorSentinel.UNIMPL)) {
+        c := BusErrorCause.UNIMPL
+      } elsewhen (BusErrorSentinel.isLane(data, BusErrorSentinel.SLVERR)) {
+        c := BusErrorCause.SLVERR
+      } elsewhen (BusErrorSentinel.isLane(data, BusErrorSentinel.TIMEOUT_CMD) ||
+          BusErrorSentinel.isLane(data, BusErrorSentinel.TIMEOUT_RSP)) {
+        c := BusErrorCause.TIMEOUT
+      } otherwise {
+        c := Mux(resp === SLVERR, BusErrorCause.SLVERR, BusErrorCause.DECERR)
+      }
+      c
+    }
+
+    when(b.fire && b.resp =/= OKAY) {
+      val c = Mux(b.resp === DECERR, BusErrorCause.DECERR, BusErrorCause.SLVERR)
+      ev.valid := True
+      ev.payload.assign(lastAwAddr, True, masterId, c)
+    }
+    when(r.fire && r.resp =/= OKAY && r.last) {
+      ev.valid := True
+      ev.payload.assign(lastArAddr, False, masterId, causeOf(r.resp, r.data), r.data.resized)
+    }
+    ev
   }
 
   def flows(addressMapping: UInt => Bool, axis: Axi4Bus*): Seq[(Data, Flow[Bits])] = {

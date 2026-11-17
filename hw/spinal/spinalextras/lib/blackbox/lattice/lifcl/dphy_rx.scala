@@ -93,7 +93,7 @@ class dphy_rx(cfg : MIPIConfig,
               with_rx_fifo : Boolean = false,
               /** Soft-DPHY CRC_CHECK_IN. When false, crc_check_o / crc_error_o are omitted. */
               enable_crc_check : Boolean = true,
-              /** Soft-DPHY LANE_ALIGN (2-lane deskew). Not encoded in [[ip_name]]; must match .cfg. */
+              /** Soft-DPHY LANE_ALIGN (2-lane deskew). Encoded in [[ip_name]] when false (`nola_`). */
               with_lane_align : Boolean = true) extends BlackBox {
   val is_soft_phy = true
   val config_for_continous_clock = is_continous_clock.getOrElse(byte_cd == null)
@@ -127,11 +127,11 @@ class dphy_rx(cfg : MIPIConfig,
     val byte_f = s"_byte${clockString(byte_freq)}"
     val clock_suffix_str = if(clock_suffix) s"${sync_f}${byte_f}" else ""
     val cont_string = if (config_for_continous_clock) "cont_" else ""
-    // Prefer nolmmi_ suffix when LMMI is off (Radiant IP naming on this branch);
-    // default-with-LMMI keeps the historical unsuffixed Soft-DPHY name.
-    // RX FIFO / LANE_ALIGN are independent (YAML withRxFifo / withLaneAlign); not encoded in the name.
+    // Prefer nolmmi_ / nola_ when those Soft-DPHY options are off so the
+    // blackbox name tracks the regenerated Radiant IP .cfg.
     val lmmi_string = if (with_lmmi) "" else "nolmmi_"
-    ip_name = s"dphy_rx_${cont_string}${lmmi_string}${cfg.numRXLanes}x${cfg.rxGear}${clock_suffix_str}"
+    val lane_align_string = if (with_lane_align) "" else "nola_"
+    ip_name = s"dphy_rx_${cont_string}${lmmi_string}${lane_align_string}${cfg.numRXLanes}x${cfg.rxGear}${clock_suffix_str}"
   }
 
   def solve_datasettle(byte_freq : HertzNumber, ui_freq : HertzNumber): Int = {

@@ -2,7 +2,7 @@ package spinalextras.lib.misc
 
 import spinal.core.internals.ExpressionContainer
 import spinal.core.native.RefOwnerType
-import spinal.core.{BitVector, BlackBox, Bundle, ClockDomain, Component, Data, GlobalData, HardType, HertzNumber, Nameable, SpinalEnum, SpinalEnumCraft, SpinalInfo, SpinalWarning, out}
+import spinal.core.{BitVector, BlackBox, Bundle, ClockDomain, Component, Data, GlobalData, HardType, HertzNumber, Mem, Nameable, SpinalEnum, SpinalEnumCraft, SpinalInfo, SpinalTag, SpinalWarning, out}
 import spinal.lib.fsm.StateMachineTask
 
 import java.io.PrintWriter
@@ -10,6 +10,9 @@ import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
 object Obfuscater {
+  /** Preserve a human-readable anchor name through obfuscation. */
+  object KeepName extends SpinalTag
+
   def apply(c : Component): Component = {
     val obf = new Obfuscater()
     obf.processComponent(c, is_top_level = true)
@@ -39,8 +42,16 @@ class Obfuscater() {
     s"${signalPrefix()}${gprefix}_${id}"
   }
 
+  private def preserveName(n: Nameable): Boolean = n match {
+    case c: Component => c.hasTag(Obfuscater.KeepName)
+    case d: Data => d.hasTag(Obfuscater.KeepName)
+    case m: Mem[_] => m.hasTag(Obfuscater.KeepName)
+    case _ => false
+  }
+
   def shouldExclude(n : Nameable): Boolean = {
     n match {
+      case x if preserveName(x) => true
       case _ : BlackBox => true
       case null => false
       case _ => shouldExclude(n.refOwner.asInstanceOf[Nameable])
@@ -139,7 +150,7 @@ class Obfuscater() {
     if(filteredRecurseInto) {
       nameable.foreachReflectableNameables(that => apply(that))
     }
-    if (nameable.name != null && nameable.name != "") {
+    if (!preserveName(nameable) && nameable.name != null && nameable.name != "") {
       setName(nameable, nextName())
     }
     depth = depth - 1
@@ -173,8 +184,10 @@ class Obfuscater() {
 
     if (!is_top_level) {
       component.getAllIo.foreach(x => apply(x))
-      component.setDefinitionName(nextName())
-      setName(component, nextName())
+      if (!preserveName(component)) {
+        component.setDefinitionName(nextName())
+        setName(component, nextName())
+      }
     } else {
       gprefix = component.name.hashCode.abs.toString
       component.getGroupedIO(true).foreach(exclude)

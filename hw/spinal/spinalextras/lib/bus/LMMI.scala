@@ -65,6 +65,7 @@ class LMMI(config: LMMIConfig) extends Bundle with IMasterSlave {
 
     pmb.rsp.valid := rsp.valid
     pmb.rsp.payload.data := rsp.payload
+    pmb.rsp.payload.error := False
 
     pmb
   }

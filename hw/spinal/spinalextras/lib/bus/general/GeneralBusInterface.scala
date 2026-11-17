@@ -13,6 +13,8 @@ import scala.reflect.{ClassTag, classTag}
 trait BusSlaveProvider {
   def add_slave_factory(name: String, mapping: SizeMapping, m2s_stage : Boolean, s2m_stage : Boolean, tags: String*): BusSlaveFactory
   def add_bus_interface(name: String, mapping: SizeMapping, tags: String*): BusIf = ???
+  def add_bus_interface(name: String, mapping: SizeMapping, m2s_stage: Boolean, s2m_stage: Boolean, tags: String*): BusIf =
+    add_bus_interface(name, mapping, tags:_*)
 
   val lock = Lock()
   def retain() = lock.retain()

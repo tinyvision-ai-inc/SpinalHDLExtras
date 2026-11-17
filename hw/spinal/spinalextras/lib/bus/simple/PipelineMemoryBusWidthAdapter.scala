@@ -94,6 +94,7 @@ case class PipelineMemoryBusWidthAdapter(pmbIn : PipelinedMemoryBusConfig,
       rspStream.ready := True
       io.input.rsp.valid := rspStream.valid
       io.input.rsp.data := rspStream.payload
+      io.input.rsp.error := False
     } else new Area {
       val input_size_per_output_size = shift_out - shift_in
       //require(endianness == LITTLE)
@@ -122,6 +123,7 @@ case class PipelineMemoryBusWidthAdapter(pmbIn : PipelinedMemoryBusConfig,
       StreamJoin(q, io.output.rsp.toStream(overflow).stage()).map( matched_rsp => {
         val rsp = PipelinedMemoryBusRsp(pmbIn)
         rsp.data := (matched_rsp._2.data >> (pmbIn.dataWidth * matched_rsp._1)).resized
+        rsp.error := matched_rsp._2.error
         rsp
       }).toFlow <> io.input.rsp
       assert(!overflow, "Width adapter overflow 114")
@@ -200,6 +202,7 @@ case class SimpleMemoryProvider(init :  Seq[BigInt] = Seq.empty,
   val read = RegNext(io.bus.cmd.fire && !io.bus.cmd.write) init(False)
   io.bus.rsp.data := port.rdata
   io.bus.rsp.valid := read
+  io.bus.rsp.error := False
 
   override def formalComponentProperties() = new FormalProperties(this) {
 
