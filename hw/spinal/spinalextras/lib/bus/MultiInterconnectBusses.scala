@@ -458,6 +458,9 @@ package object bus {
 
   MultiInterconnectConnectFactory.AddHandler { case (m: DBusSimpleBusExt, s: PipelinedMemoryBusMultiBus) => new Composite(m.bus, "dbus_to_pmb") with HasFormalProperties {
     m.bus.toPipelinedMemoryBus() >> s.bus
+    // VexRiscv's toPipelinedMemoryBus leaves rsp.error undriven.
+    m.bus.rsp.error.allowOverride()
+    m.bus.rsp.error := s.bus.rsp.error
 
     override protected def formalProperties() = new FormalProperties(this) {
       addFormalProperty(new DBusSimpleFormal(m.bus).contract.outstandingReads.asUInt === s.bus.contract.outstandingReads.value, "Oustanding reads match")
