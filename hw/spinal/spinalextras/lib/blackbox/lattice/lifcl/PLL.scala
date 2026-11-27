@@ -1309,6 +1309,13 @@ object PLLConfig {
     }
   }
 
+  /**
+   * Skip the integer solver. A design whose PLL was brought up with the
+   * fractional setup (feedback taken from the VCO) keeps that setup when an
+   * added output happens to make an integer one possible.
+   */
+  var preferFractional = false
+
   def createClockConfig(inputClock : ClockSpecification, outputClocks : ClockSpecification*): PLLClockConfig = {
     var config = Map[String, Any]()
 
@@ -1349,7 +1356,7 @@ object PLLConfig {
     // F is packed into SSC_F_CODE by ssc_f_code_shift. Integer mode is used
     // when it can hit every requested output.
 
-    var solution = solve_non_fractional(inputClock, actualOutputClocks:_*)
+    var solution = if (preferFractional) None else solve_non_fractional(inputClock, actualOutputClocks:_*)
     if(solution.isEmpty) {
       solution = solve_fractional(inputClock, actualOutputClocks: _*)
     }
